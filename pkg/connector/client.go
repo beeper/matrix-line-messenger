@@ -29,6 +29,9 @@ type LineClient struct {
 	reqSeqMu    sync.Mutex
 	sentReqSeqs map[int]time.Time
 
+	// cacheMu protects peerKeys, contactCache, mediaFlowCache, and noE2EEGroups.
+	// Hold it only around map accesses — never across network calls.
+	cacheMu        sync.Mutex
 	noE2EEGroups   map[string]time.Time // chatMid -> when group E2EE failure was cached
 	contactCache   map[string]cachedContact
 	mediaFlowCache map[string]cachedMediaFlow
@@ -62,18 +65,19 @@ const defaultMediaFlowTTL = 6 * time.Hour
 // for the given chat and content type. Returns true for E2EE, false for plain.
 // Falls back to true (E2EE) if the server call fails, to preserve existing behavior.
 func (lc *LineClient) shouldUseE2EEMediaFlow(chatMid string, contentType int) bool {
+	lc.cacheMu.Lock()
 	if lc.mediaFlowCache == nil {
 		lc.mediaFlowCache = make(map[string]cachedMediaFlow)
 	}
-
 	if cached, ok := lc.mediaFlowCache[chatMid]; ok && time.Since(cached.cachedAt) < cached.ttl {
+		lc.cacheMu.Unlock()
 		flow, exists := cached.flowMap[strconv.Itoa(contentType)]
 		if exists {
 			return flow == 2
 		}
-		// Content type not in map — default to E2EE
 		return true
 	}
+	lc.cacheMu.Unlock()
 
 	client := line.NewClient(lc.AccessToken)
 	resp, err := client.DetermineMediaMessageFlow(chatMid)
@@ -90,11 +94,13 @@ func (lc *LineClient) shouldUseE2EEMediaFlow(chatMid string, contentType int) bo
 		}
 	}
 
+	lc.cacheMu.Lock()
 	lc.mediaFlowCache[chatMid] = cachedMediaFlow{
 		flowMap:  resp.FlowMap,
 		cachedAt: time.Now(),
 		ttl:      ttl,
 	}
+	lc.cacheMu.Unlock()
 
 	flow, exists := resp.FlowMap[strconv.Itoa(contentType)]
 	if exists {
@@ -156,12 +162,14 @@ func (lc *LineClient) recoverToken(ctx context.Context) error {
 }
 
 func (lc *LineClient) Connect(ctx context.Context) {
+	lc.cacheMu.Lock()
 	if lc.peerKeys == nil {
 		lc.peerKeys = make(map[string]peerKeyInfo)
 	}
 	if lc.contactCache == nil {
 		lc.contactCache = make(map[string]cachedContact)
 	}
+	lc.cacheMu.Unlock()
 	lc.reqSeqMu.Lock()
 	if lc.sentReqSeqs == nil {
 		lc.sentReqSeqs = make(map[int]time.Time)

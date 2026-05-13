@@ -291,7 +291,10 @@ func (lc *LineClient) generateNameFromMembers(members map[string]bool) string {
 		if mid == string(lc.UserLogin.ID) || mid == lc.Mid || strings.HasPrefix(mid, "c") || strings.HasPrefix(mid, "r") {
 			continue
 		}
-		if cached, ok := lc.contactCache[mid]; ok && cached.DisplayName != "" {
+		lc.cacheMu.Lock()
+		cached, ok := lc.contactCache[mid]
+		lc.cacheMu.Unlock()
+		if ok && cached.DisplayName != "" {
 			names = append(names, cached.DisplayName)
 		}
 		count++
@@ -428,7 +431,9 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 
 	if OperationType(op.Type) == OpContactUpdate {
 		mid := op.Param1
+		lc.cacheMu.Lock()
 		delete(lc.contactCache, mid)
+		lc.cacheMu.Unlock()
 		contact := lc.getContact(ctx, mid)
 		name := contact.EffectiveDisplayName()
 		lc.UserLogin.Bridge.Log.Info().Str("mid", mid).Str("name", name).Msg("Contact updated")

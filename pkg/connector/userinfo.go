@@ -209,7 +209,10 @@ func (lc *LineClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*
 }
 
 func (lc *LineClient) getContact(ctx context.Context, mid string) line.Contact {
-	if cached, ok := lc.contactCache[mid]; ok && time.Since(cached.cachedAt) < contactCacheTTL {
+	lc.cacheMu.Lock()
+	cached, ok := lc.contactCache[mid]
+	lc.cacheMu.Unlock()
+	if ok && time.Since(cached.cachedAt) < contactCacheTTL {
 		return cached.Contact
 	}
 
@@ -225,7 +228,7 @@ func (lc *LineClient) getContact(ctx context.Context, mid string) line.Contact {
 		}
 		if err == nil && profile != nil {
 			contact := line.Contact{Mid: mid, DisplayName: profile.DisplayName, PicturePath: profile.PicturePath}
-			lc.contactCache[mid] = cachedContact{Contact: contact, cachedAt: time.Now()}
+			lc.setCachedContact(mid, contact)
 			return contact
 		}
 		return line.Contact{Mid: mid, DisplayName: mid}
@@ -241,7 +244,7 @@ func (lc *LineClient) getContact(ctx context.Context, mid string) line.Contact {
 	}
 	if err == nil && res != nil && res.Contacts != nil {
 		if wrapper, ok := res.Contacts[mid]; ok {
-			lc.contactCache[mid] = cachedContact{Contact: wrapper.Contact, cachedAt: time.Now()}
+			lc.setCachedContact(mid, wrapper.Contact)
 			return wrapper.Contact
 		}
 	}
@@ -258,7 +261,7 @@ func (lc *LineClient) getContact(ctx context.Context, mid string) line.Contact {
 	if err == nil && buddy != nil {
 		lc.UserLogin.Bridge.Log.Debug().Str("mid", mid).Str("display_name", buddy.DisplayName).Str("picture_path", buddy.PicturePath).Msg("Got buddy profile")
 		contact := line.Contact{Mid: mid, DisplayName: buddy.DisplayName, PicturePath: buddy.PicturePath}
-		lc.contactCache[mid] = cachedContact{Contact: contact, cachedAt: time.Now()}
+		lc.setCachedContact(mid, contact)
 		return contact
 	}
 	if err != nil {
@@ -266,6 +269,16 @@ func (lc *LineClient) getContact(ctx context.Context, mid string) line.Contact {
 	}
 
 	return line.Contact{Mid: mid, DisplayName: mid}
+}
+
+// setCachedContact stores a contact in the cache under lc.cacheMu.
+func (lc *LineClient) setCachedContact(mid string, contact line.Contact) {
+	lc.cacheMu.Lock()
+	if lc.contactCache == nil {
+		lc.contactCache = make(map[string]cachedContact)
+	}
+	lc.contactCache[mid] = cachedContact{Contact: contact, cachedAt: time.Now()}
+	lc.cacheMu.Unlock()
 }
 
 func (lc *LineClient) ResolveIdentifier(ctx context.Context, identifier string, createChat bool) (*bridgev2.ResolveIdentifierResponse, error) {
