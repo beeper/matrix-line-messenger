@@ -112,8 +112,22 @@ func (lc *LineClient) queueIncomingMessage(msg *line.Message, opType int) {
 						if peerMid == lc.Mid || peerMid == string(lc.UserLogin.ID) {
 							peerMid = msg.To
 						}
-						if _, _, errPeer := lc.ensurePeerKey(context.Background(), peerMid); errPeer != nil {
-							lc.UserLogin.Bridge.Log.Warn().Err(errPeer).Str("peer", peerMid).Msg("Failed to force-fetch peer key for retry")
+						// Fetch the EXACT keyID the message used (handles peer key rotation)
+						// before falling back to negotiating the peer's current key.
+						fetched := false
+						if len(msg.Chunks) >= 5 {
+							if receiverKeyID, errKID := e2ee.DecodeKeyID(msg.Chunks[len(msg.Chunks)-1]); errKID == nil && receiverKeyID != 0 {
+								if _, _, errPeer := lc.ensurePeerKeyByID(context.Background(), peerMid, receiverKeyID); errPeer == nil {
+									fetched = true
+								} else {
+									lc.UserLogin.Bridge.Log.Debug().Err(errPeer).Str("peer", peerMid).Int("key_id", receiverKeyID).Msg("ensurePeerKeyByID failed on retry, falling back to NegotiateE2EEPublicKey")
+								}
+							}
+						}
+						if !fetched {
+							if _, _, errPeer := lc.ensurePeerKey(context.Background(), peerMid); errPeer != nil {
+								lc.UserLogin.Bridge.Log.Warn().Err(errPeer).Str("peer", peerMid).Msg("Failed to force-fetch peer key for retry")
+							}
 						}
 						if ptRetry, errRetry := lc.E2EE.DecryptMessageV2(msg); errRetry == nil {
 							bodyText = ptRetry

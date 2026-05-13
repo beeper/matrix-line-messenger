@@ -109,18 +109,30 @@ func (m *Manager) LoadMyKeyFromSecureData(data map[string]any) error {
 	if len(ids) == 0 {
 		return fmt.Errorf("no numeric key ids in exportedKeyMap")
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(ids)))
+	// Ascending: highest keyID is loaded LAST so it wins as myKey, while all
+	// older device keys are still registered in keyByRawID/peerPublic for
+	// decrypting echoes of messages sent from another of the user's devices.
+	sort.Ints(ids)
+	var loadedAny bool
+	var lastErr error
 	for _, id := range ids {
-		v := rawMap[strconv.Itoa(id)]
-		b64, ok := v.(string)
+		b64, ok := rawMap[strconv.Itoa(id)].(string)
 		if !ok {
 			continue
 		}
 		if err := m.LoadMyKey(b64); err == nil {
-			return nil
+			loadedAny = true
+		} else {
+			lastErr = err
 		}
 	}
-	return fmt.Errorf("failed to load any exported key")
+	if !loadedAny {
+		if lastErr != nil {
+			return fmt.Errorf("failed to load any exported key: %w", lastErr)
+		}
+		return fmt.Errorf("failed to load any exported key")
+	}
+	return nil
 }
 
 func (m *Manager) LoadMyKeyFromExportedMap(exported map[string]string) error {
@@ -606,6 +618,17 @@ func (m *Manager) HasPeerPublicKey(rawKeyID int) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.peerPublic[rawKeyID]
+	return ok
+}
+
+// IsMyKey returns true if the given raw key ID is one of the user's own
+// device keys — i.e., a private key we have via the shared keychain. Used
+// to detect echoes of messages sent from another of the user's devices,
+// since myRawKeyID only points to the latest one.
+func (m *Manager) IsMyKey(rawKeyID int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.keyByRawID[rawKeyID]
 	return ok
 }
 

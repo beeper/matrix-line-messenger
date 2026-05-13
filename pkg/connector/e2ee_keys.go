@@ -198,7 +198,10 @@ func (lc *LineClient) ensurePeerKeyForMessage(ctx context.Context, msg *line.Mes
 	}
 	peerRaw := senderKeyID
 	peerMid := msg.From
-	if senderKeyID == myRaw {
+	// Treat the message as self-sent if the sender key is any of OUR devices'
+	// keys (the user's keychain shares private keys across devices). myRaw
+	// only points to the latest one, so we must check the full set.
+	if lc.E2EE.IsMyKey(senderKeyID) {
 		peerRaw = receiverKeyID
 		peerMid = msg.To
 	}
