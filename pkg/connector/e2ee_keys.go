@@ -209,15 +209,37 @@ func (lc *LineClient) ensurePeerKeyForMessage(ctx context.Context, msg *line.Mes
 		lc.cacheMu.Unlock()
 	}
 
-	// Group messages have a different chunk layout
-	if ToType(msg.ToType) == ToRoom || ToType(msg.ToType) == ToGroup {
+	senderKeyID, err1 := e2ee.DecodeKeyID(msg.Chunks[len(msg.Chunks)-2])
+	if err1 != nil {
+		lc.UserLogin.Bridge.Log.Warn().Err(err1).Msg("Failed to decode sender key ID")
 		return
 	}
-	senderKeyID, err1 := e2ee.DecodeKeyID(msg.Chunks[len(msg.Chunks)-2])
-	receiverKeyID, err2 := e2ee.DecodeKeyID(msg.Chunks[len(msg.Chunks)-1])
 	myRaw, _, errMy := lc.E2EE.MyKeyIDs()
-	if err1 != nil || err2 != nil || errMy != nil {
-		lc.UserLogin.Bridge.Log.Warn().AnErr("sender_err", err1).AnErr("receiver_err", err2).AnErr("my_key_err", errMy).Msg("Failed to extract key IDs for peer key fetch")
+	if errMy != nil {
+		lc.UserLogin.Bridge.Log.Warn().Err(errMy).Msg("Failed to get own key IDs")
+		return
+	}
+
+	// For group messages, chunks are [first, body, tag, senderKeyID, groupKeyID].
+	// We only need the sender's public key to create the decryption channel.
+	if ToType(msg.ToType) == ToRoom || ToType(msg.ToType) == ToGroup {
+		if lc.E2EE.IsMyKey(senderKeyID) {
+			return
+		}
+		if lc.E2EE.HasPeerPublicKey(senderKeyID) {
+			return
+		}
+		lc.UserLogin.Bridge.Log.Debug().Int("peer_key_id", senderKeyID).Str("peer_mid", msg.From).Msg("Fetching peer public key for group decrypt")
+		if _, _, err := lc.ensurePeerKeyByID(ctx, msg.From, senderKeyID); err != nil {
+			lc.UserLogin.Bridge.Log.Warn().Err(err).Str("peer", msg.From).Int("key_id", senderKeyID).Msg("Failed to fetch sender peer key for group decrypt")
+		}
+		return
+	}
+
+	// 1:1 message handling
+	receiverKeyID, err2 := e2ee.DecodeKeyID(msg.Chunks[len(msg.Chunks)-1])
+	if err2 != nil {
+		lc.UserLogin.Bridge.Log.Warn().Err(err2).Msg("Failed to decode receiver key ID")
 		return
 	}
 	peerRaw := senderKeyID
