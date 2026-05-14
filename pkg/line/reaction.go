@@ -2,6 +2,16 @@ package line
 
 import "encoding/json"
 
+// SticonOwnership represents a sticon ownership entry returned by
+// getSticonOwnershipByMid, mapping an ownership token to sticon details.
+type SticonOwnership struct {
+	ProductID       string `json:"productId"`
+	EmojiID         string `json:"emojiId"`
+	OwnershipToken  string `json:"ownershipToken"`
+	ResourceType    int    `json:"resourceType,omitempty"`
+	Version         int    `json:"version,omitempty"`
+}
+
 type ReactionPayload struct {
 	ChatMid string          `json:"chatMid"`
 	Curr    *ReactionDetail `json:"curr,omitempty"`

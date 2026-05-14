@@ -1,6 +1,7 @@
 package line
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -306,9 +307,6 @@ func parseE2EEPublicKey(rawData []byte) (*E2EEPublicKey, error) {
 	if pub == "" {
 		pub = findString(data["publicKey"])
 	}
-	if pub == "" {
-		pub = findString(data)
-	}
 	if keyID == 0 {
 		keyID = findInt64(data["keyId"])
 	}
@@ -317,6 +315,13 @@ func parseE2EEPublicKey(rawData []byte) (*E2EEPublicKey, error) {
 	}
 	if pub == "" || keyID == 0 {
 		return nil, fmt.Errorf("%w: missing fields (pub=%t keyID=%d raw=%s)", ErrNoUsableE2EEPublicKey, pub != "", keyID, string(rawData))
+	}
+
+	// Reject obviously invalid public keys that the recursive search may pick up.
+	if _, err := base64.StdEncoding.DecodeString(pub); err != nil {
+		if _, err2 := base64.URLEncoding.DecodeString(pub); err2 != nil {
+			return nil, fmt.Errorf("%w: public key is not valid base64: %v", ErrNoUsableE2EEPublicKey, err)
+		}
 	}
 
 	return &E2EEPublicKey{
@@ -413,6 +418,86 @@ func (c *Client) GetBuddyProfile(mid string) (*BuddyProfile, error) {
 		return nil, fmt.Errorf("getBuddyProfile failed: %s", wrapper.Message)
 	}
 	return &wrapper.Data, nil
+}
+
+// GetSticonOwnershipByMid fetches sticon ownership entries for a user.
+// Tries multiple method name variants since the exact LINE API endpoint may vary.
+func (c *Client) GetSticonOwnershipByMid(mid string) ([]SticonOwnership, error) {
+	attempts := []struct {
+		client  func(service, method string, args ...any) ([]byte, error)
+		service string
+		method  string
+		args    []any
+	}{
+		{c.callRPC, "TalkService", "getSticonOwnershipByMid", []any{1, mid}},
+		{c.callRPC, "TalkService", "getSticonOwnershipByMid", []any{mid}},
+		{c.callShopRPC, "ShopService", "getSticonOwnershipByMid", []any{mid}},
+		{c.callShopRPC, "ShopService", "getOwnedProductSummaries", []any{mid}},
+	}
+
+	for _, a := range attempts {
+		resp, err := a.client(a.service, a.method, a.args...)
+		if err != nil {
+			continue
+		}
+		var wrapper struct {
+			Code    int             `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(resp, &wrapper); err != nil {
+			continue
+		}
+		if wrapper.Code != 0 {
+			continue
+		}
+
+		var ownerships []SticonOwnership
+		if err := json.Unmarshal(wrapper.Data, &ownerships); err != nil {
+			var wrapped struct {
+				Ownerships []SticonOwnership `json:"ownerships"`
+			}
+			if err2 := json.Unmarshal(wrapper.Data, &wrapped); err2 != nil {
+				continue
+			}
+			ownerships = wrapped.Ownerships
+		}
+		if len(ownerships) > 0 {
+			return ownerships, nil
+		}
+	}
+
+	return nil, fmt.Errorf("getSticonOwnershipByMid: all method variants failed for mid=%s", mid)
+}
+
+// OwnedProductSummary represents a product owned by the user.
+type OwnedProductSummary struct {
+	ProductID string `json:"productId"`
+	Type      int    `json:"type"`
+}
+
+// GetOwnedProductSummaries fetches owned product summaries for a user.
+func (c *Client) GetOwnedProductSummaries(mid string) ([]OwnedProductSummary, error) {
+	resp, err := c.callShopRPC("ShopService", "getOwnedProductSummaries", mid)
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(resp, &wrapper); err != nil {
+		return nil, fmt.Errorf("failed to parse getOwnedProductSummaries response: %w", err)
+	}
+	if wrapper.Code != 0 {
+		return nil, fmt.Errorf("getOwnedProductSummaries failed: %s", wrapper.Message)
+	}
+	var products []OwnedProductSummary
+	if err := json.Unmarshal(wrapper.Data, &products); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal product summaries: %w", err)
+	}
+	return products, nil
 }
 
 func (c *Client) GetAllChatMids(withMemberChats, withInvitedChats bool) (*GetAllChatMidsResponse, error) {

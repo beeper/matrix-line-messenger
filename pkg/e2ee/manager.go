@@ -633,12 +633,13 @@ func (m *Manager) IsMyKey(rawKeyID int) bool {
 }
 
 func (m *Manager) RegisterPeerPublicKey(rawKeyID int, pubB64 string) {
-	if normalized, err := gen.NormalizePeerPublicKeyB64(pubB64); err == nil {
-		pubB64 = normalized
+	normalized, err := gen.NormalizePeerPublicKeyB64(pubB64)
+	if err != nil {
+		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.peerPublic[rawKeyID] = pubB64
+	m.peerPublic[rawKeyID] = normalized
 }
 
 func (m *Manager) RegisterUnwrappedKey(rawKeyID, runnerKeyID int) {

@@ -209,6 +209,19 @@ func (lc *LineClient) queueIncomingMessage(msg *line.Message, opType int) {
 				return h.ConvertDeviceContact(ctx, portal, intent, data, unwrappedText, replyRelatesTo)
 			}
 
+			// Handle inline emoji/stamp embedded in text messages
+			if data.ContentMetadata["STKID"] != "" || data.ContentMetadata["STKPKGID"] != "" ||
+				data.ContentMetadata["STICON_OWNERSHIP"] != "" {
+				if data.ContentMetadata["STICON_OWNERSHIP"] != "" {
+					h.Log.Debug().
+						Str("body_text", bodyText).
+						Str("unwrapped_text", unwrappedText).
+						Interface("content_metadata", data.ContentMetadata).
+						Msg("STICON_OWNERSHIP: full message body")
+				}
+				return h.ConvertInlineEmoji(ctx, portal, intent, data, unwrappedText, bodyText, replyRelatesTo)
+			}
+
 			// Skip empty/whitespace-only text messages (system messages that fell through)
 			if strings.TrimSpace(unwrappedText) == "" {
 				return nil, nil
