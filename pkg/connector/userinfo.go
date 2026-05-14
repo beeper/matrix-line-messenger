@@ -45,6 +45,7 @@ func (lc *LineClient) GetCapabilities(ctx context.Context, portal *bridgev2.Port
 	return &event.RoomFeatures{
 		MaxTextLength:         5000,
 		Reply:                 event.CapLevelFullySupported,
+		Reaction:              event.CapLevelRejected,
 		ReadReceipts:          true,
 		Delete:                event.CapLevelFullySupported,
 		DeleteMaxAge:          &jsontime.Seconds{Duration: 24 * time.Hour},

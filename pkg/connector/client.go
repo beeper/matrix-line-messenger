@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
 
@@ -111,6 +112,7 @@ func (lc *LineClient) shouldUseE2EEMediaFlow(chatMid string, contentType int) bo
 
 var _ bridgev2.NetworkAPI = (*LineClient)(nil)
 var _ bridgev2.ReadReceiptHandlingNetworkAPI = (*LineClient)(nil)
+var _ bridgev2.ReactionHandlingNetworkAPI = (*LineClient)(nil)
 
 func (lc *LineClient) refreshAndSave(ctx context.Context) error {
 	if lc.RefreshToken == "" {
@@ -364,6 +366,18 @@ func (lc *LineClient) Disconnect() {
 func (lc *LineClient) IsLoggedIn() bool { return lc.AccessToken != "" }
 
 func (lc *LineClient) LogoutRemote(ctx context.Context) {}
+
+func (lc *LineClient) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (bridgev2.MatrixReactionPreResponse, error) {
+	return bridgev2.MatrixReactionPreResponse{}, bridgev2.ErrReactionsNotSupported
+}
+
+func (lc *LineClient) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {
+	return nil, bridgev2.ErrReactionsNotSupported
+}
+
+func (lc *LineClient) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
+	return nil
+}
 
 func (lc *LineClient) midOrFallback() string {
 	if lc.Mid != "" {
