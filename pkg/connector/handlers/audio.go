@@ -19,6 +19,18 @@ func (h *Handler) ConvertAudio(ctx context.Context, portal *bridgev2.Portal, int
 	oid := data.ContentMetadata["OID"]
 	isPlainMedia := oid == ""
 
+	// If OID is not in ContentMetadata, check decrypted body (E2EE path)
+	if oid == "" && decryptedBody != "" && strings.Contains(decryptedBody, "OID") {
+		var decryptInfo struct {
+			OID         string `json:"OID"`
+			KeyMaterial string `json:"keyMaterial"`
+		}
+		if err := json.Unmarshal([]byte(decryptedBody), &decryptInfo); err == nil && decryptInfo.OID != "" {
+			oid = decryptInfo.OID
+			isPlainMedia = false
+		}
+	}
+
 	// For plain media, the audio is stored at r/talk/m/{messageID}
 	if isPlainMedia {
 		oid = data.ID
@@ -70,6 +82,7 @@ func (h *Handler) ConvertAudio(ctx context.Context, portal *bridgev2.Portal, int
 		if err := json.Unmarshal([]byte(decryptedBody), &decryptInfo); err == nil && decryptInfo.KeyMaterial != "" {
 			decryptedAudio, err := h.DecryptMedia(audioData, decryptInfo.KeyMaterial)
 			if err != nil {
+				h.Log.Error().Err(err).Msg("Failed to decrypt audio data")
 				return nil, fmt.Errorf("failed to decrypt audio data: %w", err)
 			}
 			audioData = decryptedAudio
