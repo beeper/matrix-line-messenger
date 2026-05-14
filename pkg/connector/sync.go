@@ -237,6 +237,14 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 		if chat.Extra.GroupExtra.CreatorMid == lc.Mid {
 			members[0].PowerLevel = ptr.Ptr(100)
 		}
+		// If the bridge user is not a full member but is an invitee, mark as invite
+		_, isMember := chat.Extra.GroupExtra.MemberMids[lc.Mid]
+		if !isMember {
+			_, isInvitee := chat.Extra.GroupExtra.InviteeMids[lc.Mid]
+			if isInvitee {
+				members[0].Membership = event.MembershipInvite
+			}
+		}
 		for m := range chat.Extra.GroupExtra.MemberMids {
 			if m == lc.Mid || m == string(lc.UserLogin.ID) || strings.HasPrefix(m, "c") || strings.HasPrefix(m, "r") {
 				continue
@@ -472,6 +480,63 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 		return
 	}
 
+	if OperationType(op.Type) == OpDeleteSelfFromChat {
+		lc.handleSelfLeave(op.Param1)
+		return
+	}
+
+	if OperationType(op.Type) == OpSendChatRemoved {
+		// Check if we initiated this leave (from HandleMatrixLeaveRoom)
+		lc.reqSeqMu.Lock()
+		_, ok := lc.sentReqSeqs[op.ReqSeq]
+		if ok {
+			delete(lc.sentReqSeqs, op.ReqSeq)
+			lc.reqSeqMu.Unlock()
+			return
+		}
+		lc.reqSeqMu.Unlock()
+		lc.handleSelfLeave(op.Param1)
+		return
+	}
+
+	if OperationType(op.Type) == OpDeleteOtherFromChat {
+		lc.UserLogin.Bridge.Log.Debug().Str("chat_mid", op.Param1).Str("leaver_mid", op.Param2).Str("param3", op.Param3).Msg("OpDeleteOtherFromChat")
+		lc.handleMemberLeave(op.Param1, op.Param2)
+		return
+	}
+
+	if OperationType(op.Type) == OpNotifiedLeaveChat {
+		lc.UserLogin.Bridge.Log.Debug().Str("param1", op.Param1).Str("param2", op.Param2).Msg("OpNotifiedLeaveChat")
+		// Try both param orderings: LINE sometimes sends params swapped compared to other ops
+		lower1 := strings.ToLower(op.Param1)
+		if strings.HasPrefix(lower1, "c") || strings.HasPrefix(lower1, "r") {
+			lc.handleMemberLeave(op.Param1, op.Param2)
+		} else {
+			lc.handleMemberLeave(op.Param2, op.Param1)
+		}
+		return
+	}
+
+	if OperationType(op.Type) == OpNotifiedJoinChat {
+		lc.handleMemberJoin(op.Param1, op.Param2)
+		return
+	}
+
+	if OperationType(op.Type) == OpCancelInvitation {
+		// param1 = chatMid, param2 = canceller, param3 = invitee whose invitation was cancelled
+		lc.handleMemberLeave(op.Param1, op.Param3)
+		return
+	}
+
+	if OperationType(op.Type) == OpInviteIntoChat || OperationType(op.Type) == OpNotifiedInviteIntoChat {
+		lc.wg.Add(1)
+		go func() {
+			defer lc.wg.Done()
+			lc.handleInvite(context.Background(), op.Param1)
+		}()
+		return
+	}
+
 	if OperationType(op.Type) == OpChatUpdate2 || OperationType(op.Type) == OpChatUpdate {
 		lc.UserLogin.Bridge.Log.Info().Str("chat_mid", op.Param1).Int("op_type", op.Type).Msg("Received chat update operation")
 		lc.wg.Add(1)
@@ -616,11 +681,8 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 	}
 
 	if (OperationType(op.Type) == OpSendMessage || OperationType(op.Type) == OpReceiveMessage) && op.Message != nil {
-		// Handle group rename system messages (contentType=18, LOC_KEY="C_PN")
 		if op.Message.ContentType == 18 {
-			if op.Message.ContentMetadata != nil && op.Message.ContentMetadata["LOC_KEY"] == "C_PN" {
-				lc.handleGroupRename(op)
-			}
+			lc.handleSystemMessage(op)
 			return
 		}
 		lc.queueIncomingMessage(op.Message, op.Type)
@@ -647,12 +709,51 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 	}
 	if err != nil {
 		lc.UserLogin.Bridge.Log.Warn().Err(err).Str("chat_mid", chatMid).Msg("Failed to fetch chat info")
+		// Only emit leave if we confirm the user is definitively not a member
+		if line.IsNotAMemberError(err) {
+			// Confirm via GetAllChatMids before emitting leave
+			isMember, isInvitee := lc.checkChatMembership(ctx, chatMid)
+			if !isMember && !isInvitee {
+				lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Confirmed user not in chat, emitting leave")
+				lc.handleSelfLeave(chatMid)
+			} else if isInvitee {
+				lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("User is an invitee, handling invite")
+				lc.handleInvite(ctx, chatMid)
+			}
+		}
 		return
 	}
 	if len(chatsResp.Chats) == 0 {
+		// Chat not returned — verify before emitting leave
+		isMember, isInvitee := lc.checkChatMembership(ctx, chatMid)
+		if !isMember && !isInvitee {
+			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Chat no longer available, user removed, emitting leave")
+			lc.handleSelfLeave(chatMid)
+		} else if isInvitee {
+			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("User is an invitee (empty resp), handling invite")
+			lc.handleInvite(ctx, chatMid)
+		}
 		return
 	}
 	chat := chatsResp.Chats[0]
+
+	// Check if the bridge user is still a member of this group
+	if chat.Extra.GroupExtra != nil {
+		_, isMember := chat.Extra.GroupExtra.MemberMids[lc.Mid]
+		_, isInvitee := chat.Extra.GroupExtra.InviteeMids[lc.Mid]
+		if !isMember && !isInvitee {
+			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Bridge user no longer in group, emitting leave")
+			lc.handleSelfLeave(chatMid)
+			return
+		}
+		if isInvitee && !isMember {
+			// Bridge user was invited but hasn't joined yet
+			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Bridge user invited to group, emitting invite")
+			lc.handleInvite(ctx, chatMid)
+			return
+		}
+	}
+
 	portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
 
 	var avatar *bridgev2.Avatar
@@ -681,6 +782,181 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 			},
 		},
 	})
+}
+
+// checkChatMembership calls GetAllChatMids to verify whether the bridge user
+// is a member or invitee of the given chat.
+func (lc *LineClient) checkChatMembership(ctx context.Context, chatMid string) (isMember, isInvitee bool) {
+	client := line.NewClient(lc.AccessToken)
+	midsResp, err := client.GetAllChatMids(true, true)
+	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
+		if errRecover := lc.recoverToken(ctx); errRecover == nil {
+			client = line.NewClient(lc.AccessToken)
+			midsResp, err = client.GetAllChatMids(true, true)
+		}
+	}
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Warn().Err(err).Msg("checkChatMembership: GetAllChatMids failed")
+		return false, false
+	}
+	for _, mid := range midsResp.MemberChatMids {
+		if mid == chatMid {
+			return true, false
+		}
+	}
+	for _, mid := range midsResp.InvitedChatMids {
+		if mid == chatMid {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func (lc *LineClient) emitMemberChange(chatMid, userMid string, membership event.Membership, ts time.Time) {
+	portalKey := networkid.PortalKey{ID: makePortalID(chatMid), Receiver: lc.UserLogin.ID}
+	sender := bridgev2.EventSender{Sender: networkid.UserID(userMid)}
+	if userMid == string(lc.UserLogin.ID) || userMid == lc.Mid {
+		sender.IsFromMe = true
+	}
+	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatInfoChange{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventChatInfoChange,
+			PortalKey: portalKey,
+			Timestamp: ts,
+		},
+		ChatInfoChange: &bridgev2.ChatInfoChange{
+			MemberChanges: &bridgev2.ChatMemberList{
+				Members: []bridgev2.ChatMember{
+					{
+						EventSender: sender,
+						Membership:  membership,
+					},
+				},
+			},
+		},
+	})
+}
+
+func (lc *LineClient) handleSelfLeave(chatMid string) {
+	lc.emitMemberChange(chatMid, string(lc.UserLogin.ID), event.MembershipLeave, time.Now())
+}
+
+func (lc *LineClient) handleMemberLeave(chatMid, leaverMid string) {
+	lower := strings.ToLower(chatMid)
+	if !strings.HasPrefix(lower, "c") && !strings.HasPrefix(lower, "r") {
+		return
+	}
+	if leaverMid == lc.Mid || leaverMid == string(lc.UserLogin.ID) {
+		lc.handleSelfLeave(chatMid)
+		return
+	}
+	lc.emitMemberChange(chatMid, leaverMid, event.MembershipLeave, time.Now())
+}
+
+func (lc *LineClient) handleMemberJoin(chatMid, joinerMid string) {
+	lower := strings.ToLower(chatMid)
+	if !strings.HasPrefix(lower, "c") && !strings.HasPrefix(lower, "r") {
+		return
+	}
+	lc.emitMemberChange(chatMid, joinerMid, event.MembershipJoin, time.Now())
+}
+
+func (lc *LineClient) handleInvite(ctx context.Context, chatMid string) {
+	client := line.NewClient(lc.AccessToken)
+	chatsResp, err := client.GetChats([]string{chatMid}, true, true)
+	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
+		if errRecover := lc.recoverToken(ctx); errRecover == nil {
+			client = line.NewClient(lc.AccessToken)
+			chatsResp, err = client.GetChats([]string{chatMid}, true, true)
+		}
+	}
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Warn().Err(err).Str("chat_mid", chatMid).Msg("Failed to fetch invited chat info")
+		return
+	}
+	if len(chatsResp.Chats) == 0 {
+		return
+	}
+	chat := chatsResp.Chats[0]
+
+	// Check if the bridge user is being invited vs. someone else
+	isBridgeUserInvitee := false
+	if chat.Extra.GroupExtra != nil {
+		_, isBridgeUserInvitee = chat.Extra.GroupExtra.InviteeMids[lc.Mid]
+	}
+
+	if !isBridgeUserInvitee {
+		// Someone else is being invited — emit MembershipInvite for each invitee
+		if chat.Extra.GroupExtra != nil {
+			for inviteeMid := range chat.Extra.GroupExtra.InviteeMids {
+				if inviteeMid == lc.Mid || inviteeMid == string(lc.UserLogin.ID) {
+					continue
+				}
+				lc.emitMemberChange(chat.ChatMid, inviteeMid, event.MembershipInvite, time.Now())
+			}
+		}
+		return
+	}
+
+	portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
+	info := lc.chatToChatInfo(&chat, false)
+	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventChatResync,
+			PortalKey: portalKey,
+			Timestamp: time.Now(),
+		},
+		ChatInfo: info,
+	})
+}
+
+func (lc *LineClient) handleSystemMessage(op line.Operation) {
+	msg := op.Message
+	if msg.ContentMetadata == nil {
+		return
+	}
+	locKey := msg.ContentMetadata["LOC_KEY"]
+	ts, _ := msg.CreatedTime.Int64()
+	if ts == 0 {
+		ts = time.Now().UnixMilli()
+	}
+	tsTime := time.UnixMilli(ts)
+	switch locKey {
+	case "C_PN":
+		lc.handleGroupRename(op)
+	case "C_MJ", "A_MJ":
+		lc.emitMemberChange(msg.To, msg.From, event.MembershipJoin, tsTime)
+	case "C_ML", "A_ML", "C_MR", "A_MR":
+		lc.UserLogin.Bridge.Log.Debug().Str("loc_key", locKey).Str("chat_mid", msg.To).Str("leaver_mid", msg.From).Msg("System message: member leave")
+		lc.emitMemberChange(msg.To, msg.From, event.MembershipLeave, tsTime)
+	case "C_GI", "C_MI", "A_MI":
+		// msg.From is the inviter, not the invitee.
+		// Extract the invitee from LOC_ARGS, which has format: inviterMid\x1einviteeMid
+		locArgs := msg.ContentMetadata["LOC_ARGS"]
+		parts := strings.SplitN(locArgs, "\x1e", 2)
+		if len(parts) == 2 {
+			inviteeMid := parts[1]
+			lc.emitMemberChange(msg.To, inviteeMid, event.MembershipInvite, tsTime)
+		}
+	case "C_IC":
+		// Invitation cancelled — emit leave for the invitee
+		// LOC_ARGS format: cancellerMid\x1einviteeMid
+		locArgs := msg.ContentMetadata["LOC_ARGS"]
+		parts := strings.SplitN(locArgs, "\x1e", 2)
+		if len(parts) == 2 {
+			inviteeMid := parts[1]
+			lc.emitMemberChange(msg.To, inviteeMid, event.MembershipLeave, tsTime)
+		}
+	case "A_MC":
+		// A_MC = Auto-join via call / member added.
+		// msg.From is the person added.
+		lc.emitMemberChange(msg.To, msg.From, event.MembershipJoin, tsTime)
+	default:
+		lc.UserLogin.Bridge.Log.Debug().
+			Str("loc_key", locKey).
+			Str("chat_mid", msg.To).
+			Msg("Unhandled system message LOC_KEY")
+	}
 }
 
 func (lc *LineClient) handleGroupRename(op line.Operation) {

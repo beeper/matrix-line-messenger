@@ -4,15 +4,23 @@ package connector
 type OperationType int
 
 const (
-	OpChatUpdate     OperationType = 121
-	OpChatUpdate2    OperationType = 122
-	OpReadReceipt    OperationType = 55
-	OpUnsendLocal    OperationType = 64
-	OpUnsendRemote   OperationType = 65
-	OpSendMessage    OperationType = 25
-	OpReceiveMessage OperationType = 26
-	OpReaction       OperationType = 140
-	OpContactUpdate  OperationType = 49
+	OpSendMessage            OperationType = 25
+	OpReceiveMessage         OperationType = 26
+	OpSendChatRemoved        OperationType = 41
+	OpContactUpdate          OperationType = 49
+	OpReadReceipt            OperationType = 55
+	OpNotifiedJoinChat       OperationType = 60
+	OpNotifiedLeaveChat      OperationType = 61
+	OpUnsendLocal            OperationType = 64
+	OpUnsendRemote           OperationType = 65
+	OpChatUpdate             OperationType = 121
+	OpChatUpdate2            OperationType = 122
+	OpInviteIntoChat         OperationType = 123
+	OpNotifiedInviteIntoChat OperationType = 124
+	OpCancelInvitation       OperationType = 126
+	OpDeleteSelfFromChat     OperationType = 127
+	OpDeleteOtherFromChat    OperationType = 132
+	OpReaction               OperationType = 140
 )
 
 // ContentType values for LINE messages.

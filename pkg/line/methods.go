@@ -305,7 +305,11 @@ func parseE2EEPublicKey(rawData []byte) (*E2EEPublicKey, error) {
 		}
 	}
 	if pub == "" {
-		pub = findString(data["publicKey"])
+		if kd, ok := data["keyData"].(string); ok {
+			pub = kd
+		} else {
+			pub = findString(data["publicKey"])
+		}
 	}
 	if keyID == 0 {
 		keyID = findInt64(data["keyId"])
