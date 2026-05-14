@@ -21,6 +21,7 @@ import (
 
 const (
 	BaseURL          = "https://line-chrome-gw.line-apps.com/api/talk/thrift/Talk"
+	ShopBaseURL      = "https://line-chrome-gw.line-apps.com/api/shop/thrift/ShopService"
 	ExtensionVersion = "3.7.2"
 	UserAgent        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 )
@@ -284,7 +285,15 @@ func (c *Client) GetRSAKeyInfo() (*RSAKeyInfo, error) {
 }
 
 func (c *Client) callRPC(service, method string, args ...interface{}) ([]byte, error) {
-	url := fmt.Sprintf("%s/%s/%s", BaseURL, service, method)
+	return c.callRPCWithBaseURL(BaseURL, service, method, args...)
+}
+
+func (c *Client) callShopRPC(service, method string, args ...interface{}) ([]byte, error) {
+	return c.callRPCWithBaseURL(ShopBaseURL, service, method, args...)
+}
+
+func (c *Client) callRPCWithBaseURL(baseURL, service, method string, args ...interface{}) ([]byte, error) {
+	url := fmt.Sprintf("%s/%s/%s", baseURL, service, method)
 
 	var bodyBytes []byte
 	if len(args) == 0 {

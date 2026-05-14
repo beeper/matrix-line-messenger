@@ -24,20 +24,20 @@ func (h *Handler) ConvertSticker(ctx context.Context, portal *bridgev2.Portal, i
 	}
 
 	if stkID != "" {
-		var url string
-		if strings.Contains(stkOpt, "A") {
-			url = fmt.Sprintf("https://stickershop.line-scdn.net/stickershop/v1/sticker/%s/android/sticker_animation.png", stkID)
-		} else {
-			url = fmt.Sprintf("https://stickershop.line-scdn.net/stickershop/v1/sticker/%s/android/sticker.png", stkID)
+		isAnimated := strings.Contains(stkOpt, "A")
+		baseURL := "https://stickershop.line-scdn.net/stickershop/v1/sticker/%s/android/sticker_animation.png"
+		fallbackURL := "https://stickershop.line-scdn.net/stickershop/v1/sticker/%s/android/sticker.png"
+		if !isAnimated {
+			baseURL, fallbackURL = fallbackURL, baseURL
 		}
 
+		url := fmt.Sprintf(baseURL, stkID)
 		resp, err := h.HTTPClient.Get(url)
-		// If animated fetch fails (e.g. 404), fallback to static if we tried animation
-		if (err != nil || resp.StatusCode != 200) && strings.Contains(stkOpt, "A") {
+		if (err != nil || resp.StatusCode != 200) && fallbackURL != "" {
 			if resp != nil {
 				resp.Body.Close()
 			}
-			url = fmt.Sprintf("https://stickershop.line-scdn.net/stickershop/v1/sticker/%s/android/sticker.png", stkID)
+			url = fmt.Sprintf(fallbackURL, stkID)
 			resp, err = h.HTTPClient.Get(url)
 		}
 
@@ -52,10 +52,32 @@ func (h *Handler) ConvertSticker(ctx context.Context, portal *bridgev2.Portal, i
 			if err != nil {
 				h.Log.Warn().Err(err).Str("stk_id", stkID).Msg("Failed to read sticker body")
 			} else {
-				if strings.Contains(stkOpt, "A") {
+				if isAnimated {
 					stkData = forceAPNGLoop(stkData)
 				}
-				mxc, file, err := intent.UploadMedia(ctx, portal.MXID, stkData, "sticker.png", "image/png")
+
+				mimeType := resp.Header.Get("Content-Type")
+				if mimeType == "" {
+					mimeType = "image/png"
+				}
+
+				var ext string
+				switch mimeType {
+				case "image/jpeg", "image/jpg":
+					ext = "jpg"
+				case "image/webp":
+					ext = "webp"
+				case "image/gif":
+					ext = "gif"
+				case "image/png":
+					ext = "png"
+				default:
+					ext = "png"
+				}
+
+				bodyName := "sticker." + ext
+
+				mxc, file, err := intent.UploadMedia(ctx, portal.MXID, stkData, bodyName, mimeType)
 				if err != nil {
 					h.Log.Warn().Err(err).Msg("Failed to upload sticker to Matrix")
 				} else {
@@ -65,11 +87,11 @@ func (h *Handler) ConvertSticker(ctx context.Context, portal *bridgev2.Portal, i
 								Type: event.EventMessage,
 								Content: &event.MessageEventContent{
 									MsgType: event.MsgImage,
-									Body:    "sticker.png",
+									Body:    bodyName,
 									URL:     mxc,
 									File:    file,
 									Info: &event.FileInfo{
-										MimeType: "image/png",
+										MimeType: mimeType,
 										Size:     len(stkData),
 									},
 									RelatesTo: relatesTo,
@@ -82,7 +104,6 @@ func (h *Handler) ConvertSticker(ctx context.Context, portal *bridgev2.Portal, i
 		}
 	}
 
-	// Fallback to text if download/upload fails
 	return &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{
 			{
