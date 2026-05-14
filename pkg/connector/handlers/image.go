@@ -30,18 +30,18 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 	var imgData []byte
 	var err error
 	if isPlainMedia {
-		imgData, err = client.DownloadOBSWithSID(oid, data.ID, "m")
+		imgData, err = client.DownloadOBSWithSID(ctx, oid, data.ID, "m")
 	} else {
-		imgData, err = client.DownloadOBS(oid, data.ID)
+		imgData, err = client.DownloadOBS(ctx, oid, data.ID)
 	}
 
 	// Refresh token if we get a 401
 	if newClient, ok := h.tryRecoverClient(ctx, err); ok {
 		client = newClient
 		if isPlainMedia {
-			imgData, err = client.DownloadOBSWithSID(oid, data.ID, "m")
+			imgData, err = client.DownloadOBSWithSID(ctx, oid, data.ID, "m")
 		} else {
-			imgData, err = client.DownloadOBS(oid, data.ID)
+			imgData, err = client.DownloadOBS(ctx, oid, data.ID)
 		}
 	}
 

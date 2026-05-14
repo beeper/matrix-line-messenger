@@ -5,7 +5,17 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+var (
+	obsTokenMu      sync.Mutex
+	obsTokenCache   string
+	obsTokenExpiry  time.Time
+)
+
+const obsTokenBuffer = 30 * time.Second
 
 // LoginV2 performs the loginV2 RPC call to authenticate a user
 func (c *Client) LoginV2(email, password, certificate, secret string) ([]byte, error) {
@@ -480,6 +490,14 @@ func (c *Client) GetLastOpRevision() (int64, error) {
 
 // this token is used to encrypt images, videos, and files uploaded to LINE's OBS storage
 func (c *Client) AcquireEncryptedAccessToken() (string, error) {
+	obsTokenMu.Lock()
+	if obsTokenCache != "" && time.Now().Before(obsTokenExpiry) {
+		cached := obsTokenCache
+		obsTokenMu.Unlock()
+		return cached, nil
+	}
+	obsTokenMu.Unlock()
+
 	// 2 = FeatureType::OBS_Authorization.
 	resp, err := c.callRPC("TalkService", "acquireEncryptedAccessToken", 2)
 	if err != nil {
@@ -487,9 +505,9 @@ func (c *Client) AcquireEncryptedAccessToken() (string, error) {
 	}
 
 	var wrapper struct {
-		Code    int    `json:"code"`
+		Code int `json:"code"`
 		Message string `json:"message"`
-		Data    string `json:"data"` // Format: "expirySeconds\x1eToken"
+		Data string `json:"data"` // Format: "expirySeconds\x1eToken"
 	}
 
 	if err := json.Unmarshal(resp, &wrapper); err != nil {
@@ -505,7 +523,15 @@ func (c *Client) AcquireEncryptedAccessToken() (string, error) {
 		return "", fmt.Errorf("invalid encrypted token format: missing separator")
 	}
 
-	return parts[1], nil
+	token := parts[1]
+	if expirySec, err := strconv.Atoi(parts[0]); err == nil && expirySec > 0 {
+		obsTokenMu.Lock()
+		obsTokenCache = token
+		obsTokenExpiry = time.Now().Add(time.Duration(expirySec)*time.Second - obsTokenBuffer)
+		obsTokenMu.Unlock()
+	}
+
+	return token, nil
 }
 
 func (c *Client) GetMessageBoxes(options MessageBoxesOptions) (*MessageBoxesResponse, error) {

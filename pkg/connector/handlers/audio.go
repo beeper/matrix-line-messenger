@@ -32,11 +32,11 @@ func (h *Handler) ConvertAudio(ctx context.Context, portal *bridgev2.Portal, int
 	if isPlainMedia {
 		sid = "m"
 	}
-	audioData, err := client.DownloadOBSWithSID(oid, data.ID, sid)
+	audioData, err := client.DownloadOBSWithSID(ctx, oid, data.ID, sid)
 
 	if newClient, ok := h.tryRecoverClient(ctx, err); ok {
 		client = newClient
-		audioData, err = client.DownloadOBSWithSID(oid, data.ID, sid)
+		audioData, err = client.DownloadOBSWithSID(ctx, oid, data.ID, sid)
 	}
 	_ = client
 
@@ -62,6 +62,7 @@ func (h *Handler) ConvertAudio(ctx context.Context, portal *bridgev2.Portal, int
 	}
 
 	// Decrypt audio if it has keyMaterial (E2EE)
+	decrypted := false
 	if decryptedBody != "" && strings.Contains(decryptedBody, "keyMaterial") {
 		var decryptInfo struct {
 			KeyMaterial string `json:"keyMaterial"`
@@ -72,15 +73,22 @@ func (h *Handler) ConvertAudio(ctx context.Context, portal *bridgev2.Portal, int
 				return nil, fmt.Errorf("failed to decrypt audio data: %w", err)
 			}
 			audioData = decryptedAudio
+			decrypted = true
 		}
 	}
 
-	if encKM := data.ContentMetadata["ENC_KM"]; encKM != "" && len(audioData) > 32 {
-		decryptedAudio, err := h.DecryptMedia(audioData, encKM)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt audio data: %w", err)
+	// ENC_KM is a fallback when the in-body keyMaterial path didn't decrypt
+	// (e.g. E2EE chunk decryption failed). Running it unconditionally would
+	// double-decrypt for bridge-sent LSON audio and corrupt the bytes.
+	if !decrypted {
+		if encKM := data.ContentMetadata["ENC_KM"]; encKM != "" && len(audioData) > 32 {
+			decryptedAudio, err := h.DecryptMedia(audioData, encKM)
+			if err != nil {
+				h.Log.Warn().Err(err).Msg("ENC_KM fallback decrypt failed, sending raw audio")
+			} else {
+				audioData = decryptedAudio
+			}
 		}
-		audioData = decryptedAudio
 	}
 
 	var duration int

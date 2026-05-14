@@ -35,7 +35,7 @@ func (h *Handler) ConvertFile(ctx context.Context, portal *bridgev2.Portal, inte
 	if isPlainMedia {
 		sid = "m"
 	}
-	fileData, err := client.DownloadOBSWithSID(oid, data.ID, sid)
+	fileData, err := client.DownloadOBSWithSID(ctx, oid, data.ID, sid)
 	if err != nil {
 		h.Log.Warn().
 			Err(err).

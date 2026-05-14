@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
@@ -44,11 +45,12 @@ func (h *Handler) ConvertVideo(ctx context.Context, portal *bridgev2.Portal, int
 	if isPlainMedia {
 		sid = "m"
 	}
-	videoData, err := client.DownloadOBSWithSID(oid, data.ID, sid)
+	dlStart := time.Now()
+	videoData, err := client.DownloadOBSWithSID(ctx, oid, data.ID, sid)
 
 	if newClient, ok := h.tryRecoverClient(ctx, err); ok {
 		client = newClient
-		videoData, err = client.DownloadOBSWithSID(oid, data.ID, sid)
+		videoData, err = client.DownloadOBSWithSID(ctx, oid, data.ID, sid)
 	}
 	_ = client
 
@@ -58,6 +60,7 @@ func (h *Handler) ConvertVideo(ctx context.Context, portal *bridgev2.Portal, int
 			Str("oid", oid).
 			Str("msg_id", data.ID).
 			Bool("plain_media", isPlainMedia).
+			Dur("download_duration", time.Since(dlStart)).
 			Msg("Failed to download video from OBS, sending placeholder")
 		return &bridgev2.ConvertedMessage{
 			Parts: []*bridgev2.ConvertedMessagePart{
@@ -73,6 +76,7 @@ func (h *Handler) ConvertVideo(ctx context.Context, portal *bridgev2.Portal, int
 		}, nil
 	}
 
+	decrypted := false
 	if decryptedBody != "" && strings.Contains(decryptedBody, "keyMaterial") {
 		var decryptInfo struct {
 			KeyMaterial string `json:"keyMaterial"`
@@ -90,22 +94,28 @@ func (h *Handler) ConvertVideo(ctx context.Context, portal *bridgev2.Portal, int
 				return nil, fmt.Errorf("failed to decrypt video data: %w", err)
 			}
 			videoData = decryptedVideo
+			decrypted = true
 			h.Log.Info().Int("decrypted_size", len(videoData)).Msg("Successfully decrypted video")
 		}
 	}
 
-	if encKM := data.ContentMetadata["ENC_KM"]; encKM != "" && len(videoData) > 32 {
-		h.Log.Debug().
-			Str("enc_km_preview", encKM[:min(20, len(encKM))]+"...").
-			Msg("Decrypting video using ENC_KM from metadata")
+	// ENC_KM is a fallback when the in-body keyMaterial path didn't decrypt
+	// (e.g. E2EE chunk decryption failed). Running it unconditionally would
+	// double-decrypt for bridge-sent LSON videos and corrupt the bytes.
+	if !decrypted {
+		if encKM := data.ContentMetadata["ENC_KM"]; encKM != "" && len(videoData) > 32 {
+			h.Log.Debug().
+				Str("enc_km_preview", encKM[:min(20, len(encKM))]+"...").
+				Msg("Decrypting video using ENC_KM from metadata (fallback)")
 
-		decryptedVideo, err := h.DecryptMedia(videoData, encKM)
-		if err != nil {
-			h.Log.Error().Err(err).Msg("Failed to decrypt video data from ENC_KM")
-			return nil, fmt.Errorf("failed to decrypt video data: %w", err)
+			decryptedVideo, err := h.DecryptMedia(videoData, encKM)
+			if err != nil {
+				h.Log.Warn().Err(err).Msg("ENC_KM fallback decrypt failed, sending raw video")
+			} else {
+				videoData = decryptedVideo
+				h.Log.Info().Int("decrypted_size", len(videoData)).Msg("Successfully decrypted video from ENC_KM")
+			}
 		}
-		videoData = decryptedVideo
-		h.Log.Info().Int("decrypted_size", len(videoData)).Msg("Successfully decrypted video from ENC_KM")
 	}
 
 	fileName := data.ContentMetadata["FILE_NAME"]
@@ -138,6 +148,7 @@ func (h *Handler) ConvertVideo(ctx context.Context, portal *bridgev2.Portal, int
 		Str("mxc", mxc.ParseOrIgnore().String()).
 		Str("file_name", fileName).
 		Int("size", len(videoData)).
+		Dur("download_duration", time.Since(dlStart)).
 		Msg("Successfully uploaded video to Matrix")
 
 	var duration int
