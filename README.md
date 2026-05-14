@@ -45,7 +45,7 @@ Based on the [mautrix-twilio](https://github.com/mautrix/twilio) bridge
   - [x] Contact sharing (receive only)
     - [x] LINE friend (name only)
     - [x] Device contact (vCard)
-  - [ ] Mentions
+  - [x] Mentions
 - [x] Read receipts
 - [x] Reaction support (Receive ONLY)
 - [x] Replies
