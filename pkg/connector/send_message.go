@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,15 @@ import (
 
 	"github.com/highesttt/matrix-line-messenger/pkg/line"
 )
+
+type mentionEntry struct {
+	S string `json:"S"`
+	E string `json:"E"`
+	M string `json:"M,omitempty"`
+	A string `json:"A,omitempty"`
+}
+
+var mentionLinkRegex = regexp.MustCompile(`<a\s+[^>]*href="https://matrix\.to/#/([^"]+)"[^>]*>([^<]+)</a>`)
 
 func (lc *LineClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
 	client := line.NewClient(lc.AccessToken)
@@ -484,6 +494,22 @@ func (lc *LineClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 		return nil, fmt.Errorf("message type %s not implemented", effectiveMsgType)
 	}
 
+	// Process mentions — set MENTION content metadata for LINE notification
+	if msg.Content.Mentions == nil {
+		msg.Content.Mentions = &event.Mentions{}
+	}
+	// Detect implicit @room/@all/@everyone in body for LINE group-wide mentions
+	if !msg.Content.Mentions.Room {
+		lowerBody := strings.ToLower(msg.Content.Body)
+		if strings.Contains(lowerBody, "@room") || strings.Contains(lowerBody, "@all") || strings.Contains(lowerBody, "@everyone") {
+			msg.Content.Mentions.Room = true
+		}
+	}
+	mentionMeta := lc.buildMentionMetadata(ctx, msg.Content.Body, msg.Content.FormattedBody, msg.Content.Mentions)
+	for k, v := range mentionMeta {
+		contentMetadata[k] = v
+	}
+
 	// Encryption phase — skip entirely for plain text
 	if !plainText {
 		if isGroup {
@@ -766,4 +792,88 @@ func (lc *LineClient) HandleMatrixLeaveRoom(ctx context.Context, portal *bridgev
 	lc.reqSeqMu.Unlock()
 
 	return client.SendChatRemoved(int64(reqSeq), string(portal.ID), "0", 0)
+}
+
+func (lc *LineClient) buildMentionMetadata(ctx context.Context, body, formattedBody string, mentions *event.Mentions) map[string]string {
+	if mentions == nil || (len(mentions.UserIDs) == 0 && !mentions.Room) {
+		return nil
+	}
+
+	var mentionees []mentionEntry
+
+	if mentions.Room {
+		lowerBody := strings.ToLower(body)
+		roomMentionTexts := []string{"@room", "@all", "@everyone"}
+		pos := -1
+		matchLen := 0
+		for _, text := range roomMentionTexts {
+			if p := strings.Index(lowerBody, text); p >= 0 {
+				pos = p
+				matchLen = len(text)
+				break
+			}
+		}
+		if pos >= 0 {
+			mentionees = append(mentionees, mentionEntry{
+				S: strconv.Itoa(pos),
+				E: strconv.Itoa(pos + matchLen),
+				A: "1",
+			})
+		}
+	}
+
+	nameByUserID := map[string]string{}
+	if formattedBody != "" {
+		for _, m := range mentionLinkRegex.FindAllStringSubmatch(formattedBody, -1) {
+			if len(m) >= 3 {
+				nameByUserID[m[1]] = m[2]
+			}
+		}
+	}
+
+	for _, userID := range mentions.UserIDs {
+		mid, ok := lc.UserLogin.Bridge.Matrix.ParseGhostMXID(userID)
+		if !ok {
+			continue
+		}
+
+		displayName := nameByUserID[string(userID)]
+
+		if displayName == "" {
+			existingGhost, err := lc.UserLogin.Bridge.GetExistingGhostByID(ctx, mid)
+			if err == nil && existingGhost != nil && existingGhost.Name != "" {
+				displayName = existingGhost.Name
+			}
+		}
+
+		if displayName == "" {
+			continue
+		}
+
+		searchStr := "@" + displayName
+		pos := strings.Index(body, searchStr)
+		if pos >= 0 {
+			mentionees = append(mentionees, mentionEntry{
+				S: strconv.Itoa(pos),
+				E: strconv.Itoa(pos + len(searchStr)),
+				M: string(mid),
+			})
+		}
+	}
+
+	if len(mentionees) == 0 {
+		return nil
+	}
+
+	mentionData := map[string]interface{}{
+		"MENTIONEES": mentionees,
+	}
+	mentionJSON, err := json.Marshal(mentionData)
+	if err != nil {
+		return nil
+	}
+
+	return map[string]string{
+		"MENTION": string(mentionJSON),
+	}
 }

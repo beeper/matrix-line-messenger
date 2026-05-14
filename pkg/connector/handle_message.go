@@ -3,6 +3,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"html"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/highesttt/matrix-line-messenger/pkg/connector/handlers"
 	"github.com/highesttt/matrix-line-messenger/pkg/e2ee"
@@ -228,7 +233,120 @@ func (lc *LineClient) queueIncomingMessage(msg *line.Message, opType int) {
 			}
 
 			// Default to text
-			return h.ConvertText(unwrappedText, replyRelatesTo)
+			converted, err := h.ConvertText(unwrappedText, replyRelatesTo)
+			if err != nil {
+				return nil, err
+			}
+
+			if mentionStr := data.ContentMetadata["MENTION"]; mentionStr != "" && len(converted.Parts) > 0 {
+				lc.UserLogin.Bridge.Log.Debug().Str("raw_mention", mentionStr).Msg("Processing inbound LINE MENTION metadata")
+				var mentionData struct {
+					MENTIONEES []struct {
+						M string `json:"M,omitempty"`
+						A string `json:"A,omitempty"`
+						S string `json:"S,omitempty"`
+						E string `json:"E,omitempty"`
+					} `json:"MENTIONEES"`
+				}
+				if err := json.Unmarshal([]byte(mentionStr), &mentionData); err != nil {
+					lc.UserLogin.Bridge.Log.Debug().Err(err).Msg("Failed to unmarshal MENTION metadata")
+				} else {
+					ghostFormatter, ok := lc.UserLogin.Bridge.Matrix.(interface {
+						FormatGhostMXID(networkid.UserID) id.UserID
+					})
+					lc.UserLogin.Bridge.Log.Debug().Bool("formatter_ok", ok).Msg("Checking FormatGhostMXID availability")
+					mentions := &event.Mentions{}
+					type mentionEntry struct {
+						start int
+						end   int
+						mxid  string
+					}
+					var entries []mentionEntry
+					for _, ment := range mentionData.MENTIONEES {
+						lc.UserLogin.Bridge.Log.Debug().
+							Str("mid", ment.M).
+							Str("a", ment.A).
+							Str("s", ment.S).
+							Str("e", ment.E).
+							Bool("has_formatter", ok).
+							Msg("Processing mention entry")
+						if ment.M != "" {
+							var mxid id.UserID
+							switch {
+							case ment.M == lc.Mid || ment.M == string(lc.UserLogin.ID):
+								mxid = lc.UserLogin.UserMXID
+								lc.UserLogin.Bridge.Log.Debug().Str("mxid", string(mxid)).Msg("Mention targets bridge user, using real MXID")
+							case ok:
+								mxid = ghostFormatter.FormatGhostMXID(networkid.UserID(ment.M))
+							default:
+								lc.UserLogin.Bridge.Log.Debug().Msg("Skip mention: unknown MID and no formatter available")
+								continue
+							}
+							lc.UserLogin.Bridge.Log.Debug().Str("mxid", string(mxid)).Msg("Formatted MXID from LINE MID")
+							mentions.UserIDs = append(mentions.UserIDs, mxid)
+							if s, errS := strconv.Atoi(ment.S); errS == nil && s >= 0 {
+								if e, errE := strconv.Atoi(ment.E); errE == nil && e <= len(unwrappedText) && e > s {
+									entries = append(entries, mentionEntry{start: s, end: e, mxid: string(mxid)})
+								}
+							}
+						}
+						if ment.A == "1" {
+							mentions.Room = true
+							if s, errS := strconv.Atoi(ment.S); errS == nil && s >= 0 {
+								if e, errE := strconv.Atoi(ment.E); errE == nil && e <= len(unwrappedText) && e > s {
+									entries = append(entries, mentionEntry{start: s, end: e, mxid: "@room"})
+								}
+							}
+						}
+					}
+					if len(mentions.UserIDs) > 0 || mentions.Room {
+						logEvt := lc.UserLogin.Bridge.Log.Debug().
+							Int("user_count", len(mentions.UserIDs)).
+							Bool("is_room", mentions.Room)
+						if len(entries) > 0 {
+							logEvt = logEvt.Int("formatted_body_entries", len(entries))
+						}
+						logEvt.Msg("Setting mentions on converted message")
+						var formattedBody string
+						if len(entries) > 0 {
+							sort.Slice(entries, func(i, j int) bool { return entries[i].start < entries[j].start })
+							var fb strings.Builder
+							lastEnd := 0
+							for _, entry := range entries {
+								if entry.start >= lastEnd && entry.start >= 0 && entry.end <= len(unwrappedText) && entry.start < entry.end {
+									fb.WriteString(html.EscapeString(unwrappedText[lastEnd:entry.start]))
+									fb.WriteString(fmt.Sprintf(`<a href="https://matrix.to/#/%s">%s</a>`, html.EscapeString(entry.mxid), html.EscapeString(unwrappedText[entry.start:entry.end])))
+									lastEnd = entry.end
+								}
+							}
+							fb.WriteString(html.EscapeString(unwrappedText[lastEnd:]))
+							formattedBody = fb.String()
+						}
+						// Replace room mention text in body with @room for client-side highlighting.
+						// Process end-to-start to preserve positions for earlier entries.
+						if mentions.Room && len(entries) > 0 {
+							body := converted.Parts[0].Content.Body
+							for i := len(entries) - 1; i >= 0; i-- {
+								if entries[i].mxid == "@room" && entries[i].start >= 0 && entries[i].end <= len(body) {
+									body = body[:entries[i].start] + "@room" + body[entries[i].end:]
+								}
+							}
+							for _, part := range converted.Parts {
+								part.Content.Body = body
+							}
+						}
+						for _, part := range converted.Parts {
+							part.Content.Mentions = mentions
+							if formattedBody != "" {
+								part.Content.Format = event.FormatHTML
+								part.Content.FormattedBody = formattedBody
+							}
+						}
+					}
+				}
+			}
+
+			return converted, nil
 		},
 	})
 }
