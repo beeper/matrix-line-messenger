@@ -2,6 +2,7 @@ package line
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -26,12 +27,14 @@ const (
 
 type Client struct {
 	HTTPClient  *http.Client
+	OBSClient   *http.Client
 	AccessToken string
 }
 
 func NewClient(token string) *Client {
 	return &Client{
 		HTTPClient:  &http.Client{Timeout: 30 * time.Second},
+		OBSClient:   &http.Client{},
 		AccessToken: token,
 	}
 }
@@ -626,11 +629,11 @@ func (c *Client) UploadOBSWithOIDAndSID(data []byte, oid string, sid string) err
 }
 
 // DownloadOBS retrieves media from LINE's Object Storage using the OID.
-func (c *Client) DownloadOBS(oid string, messageID string) ([]byte, error) {
-	return c.DownloadOBSWithSID(oid, messageID, "emi")
+func (c *Client) DownloadOBS(ctx context.Context, oid string, messageID string) ([]byte, error) {
+	return c.DownloadOBSWithSID(ctx, oid, messageID, "emi")
 }
 
-func (c *Client) DownloadOBSWithSID(oid string, messageID string, sid string) ([]byte, error) {
+func (c *Client) DownloadOBSWithSID(ctx context.Context, oid string, messageID string, sid string) ([]byte, error) {
 	// URL structure: https://obs.line-apps.com/r/talk/{SID}/{OID}
 	// SID: emi (images), emv (videos), ema (audio), emf (files)
 	url := fmt.Sprintf("%s/r/talk/%s/%s", OBSBaseURL, sid, oid)
@@ -640,26 +643,26 @@ func (c *Client) DownloadOBSWithSID(oid string, messageID string, sid string) ([
 		return nil, fmt.Errorf("failed to acquire encrypted access token: %w", err)
 	}
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OBS download request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", UserAgent)
-	if obsToken != "" {
-		req.Header.Set("x-line-access", obsToken)
-	}
-
-	// Add x-talk-meta header with Thrift-encoded message
-	if messageID != "" {
-		talkMeta := c.constructTalkMeta(messageID)
-		req.Header.Set("x-talk-meta", talkMeta)
-	}
-
 	// Retry loop for 202 (media still processing, e.g. video transcoding)
 	maxRetries := 5
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		resp, err := c.HTTPClient.Do(req)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OBS download request: %w", err)
+		}
+
+		req.Header.Set("User-Agent", UserAgent)
+		if obsToken != "" {
+			req.Header.Set("x-line-access", obsToken)
+		}
+
+		// Add x-talk-meta header with Thrift-encoded message
+		if messageID != "" {
+			talkMeta := c.constructTalkMeta(messageID)
+			req.Header.Set("x-talk-meta", talkMeta)
+		}
+
+		resp, err := c.OBSClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("OBS download request failed: %w", err)
 		}
@@ -667,16 +670,6 @@ func (c *Client) DownloadOBSWithSID(oid string, messageID string, sid string) ([
 		if (resp.StatusCode == 202 || resp.StatusCode == 404) && attempt < maxRetries {
 			resp.Body.Close()
 			time.Sleep(2 * time.Second)
-			// Rebuild request for retry
-			req, _ = http.NewRequest("GET", url, nil)
-			req.Header.Set("User-Agent", UserAgent)
-			if obsToken != "" {
-				req.Header.Set("x-line-access", obsToken)
-			}
-			if messageID != "" {
-				talkMeta := c.constructTalkMeta(messageID)
-				req.Header.Set("x-talk-meta", talkMeta)
-			}
 			continue
 		}
 
