@@ -61,6 +61,18 @@ type talkExceptionData struct {
 	Reason  string `json:"reason"`
 }
 
+// IsNotAMemberError returns true when the API reports the user is not a member of a chat.
+func IsNotAMemberError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "\"code\":10051") &&
+		strings.Contains(msg, "talkexception") &&
+		strings.Contains(msg, "\"code\":10,") &&
+		strings.Contains(msg, "\"not a member\"")
+}
+
 func isNoUsableE2EEGroupKeyTalkException(message string, data talkExceptionData) bool {
 	if !strings.EqualFold(message, "RESPONSE_ERROR") || !strings.EqualFold(data.Name, "TalkException") {
 		return false
