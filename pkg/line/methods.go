@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	obsTokenMu      sync.Mutex
-	obsTokenCache   string
-	obsTokenExpiry  time.Time
+	obsTokenMu     sync.Mutex
+	obsTokenCache  string
+	obsTokenExpiry time.Time
 )
 
 const obsTokenBuffer = 30 * time.Second
@@ -505,9 +505,9 @@ func (c *Client) AcquireEncryptedAccessToken() (string, error) {
 	}
 
 	var wrapper struct {
-		Code int `json:"code"`
+		Code    int    `json:"code"`
 		Message string `json:"message"`
-		Data string `json:"data"` // Format: "expirySeconds\x1eToken"
+		Data    string `json:"data"` // Format: "expirySeconds\x1eToken"
 	}
 
 	if err := json.Unmarshal(resp, &wrapper); err != nil {
