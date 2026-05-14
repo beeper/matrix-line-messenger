@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 
 const (
 	BaseURL          = "https://line-chrome-gw.line-apps.com/api/talk/thrift/Talk"
+	QRLoginBaseURL   = "https://line-chrome-gw.line-apps.com/api/talk/thrift/LoginQrCode"
 	ShopBaseURL      = "https://line-chrome-gw.line-apps.com/api/shop/thrift/ShopService"
 	ExtensionVersion = "3.7.2"
 	UserAgent        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
@@ -386,10 +388,25 @@ func (c *Client) ConfirmE2EELogin(verifier, serverPublicKeyB64, encryptedKeyChai
 	return nil
 }
 
+type hmacPostOptions struct {
+	includeLineApplication bool
+	sessionID              string
+	longPollingTimeout     string
+	ctx                    context.Context
+}
+
 // postWithHMAC is a small helper for non-standard RPC endpoints that still expect
 // the same headers and HMAC signature as the Talk endpoints.
 func (c *Client) postWithHMAC(fullURL string, body []byte) ([]byte, error) {
-	req, err := http.NewRequest("POST", fullURL, bytes.NewBuffer(body))
+	return c.postWithHMACOptions(fullURL, body, hmacPostOptions{includeLineApplication: true})
+}
+
+func (c *Client) postWithHMACOptions(fullURL string, body []byte, opts hmacPostOptions) ([]byte, error) {
+	ctx := opts.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -397,8 +414,16 @@ func (c *Client) postWithHMAC(fullURL string, body []byte) ([]byte, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("x-line-chrome-version", ExtensionVersion)
-	req.Header.Set("x-line-application", "CHROMEOS\t3.7.2\tChrome_OS")
+	if opts.includeLineApplication {
+		req.Header.Set("x-line-application", "CHROMEOS\t3.7.2\tChrome_OS")
+	}
 	req.Header.Set("x-lal", "en_US")
+	if opts.sessionID != "" {
+		req.Header.Set("X-Line-Session-ID", opts.sessionID)
+	}
+	if opts.longPollingTimeout != "" {
+		req.Header.Set("X-LST", opts.longPollingTimeout)
+	}
 	if c.AccessToken != "" {
 		req.Header.Set("x-line-access", c.AccessToken)
 		req.Header.Set("Cookie", fmt.Sprintf("lct=%s", c.AccessToken))
@@ -416,7 +441,21 @@ func (c *Client) postWithHMAC(fullURL string, body []byte) ([]byte, error) {
 	}
 	req.Header.Set("x-hmac", signature)
 
-	resp, err := c.HTTPClient.Do(req)
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	if opts.longPollingTimeout != "" {
+		if timeoutMillis, err := strconv.Atoi(opts.longPollingTimeout); err == nil && timeoutMillis > 0 {
+			timeout := time.Duration(timeoutMillis)*time.Millisecond + 10*time.Second
+			if httpClient.Timeout == 0 || httpClient.Timeout < timeout {
+				copied := *httpClient
+				copied.Timeout = timeout
+				httpClient = &copied
+			}
+		}
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}

@@ -36,9 +36,10 @@ type Runner struct {
 }
 
 type SecretResult struct {
-	Secret       string `json:"secret"`
-	Pin          string `json:"pin"`
-	PublicKeyHex string `json:"publicKeyHex"`
+	Secret          string `json:"secret"`
+	Pin             string `json:"pin"`
+	PublicKeyHex    string `json:"publicKeyHex"`
+	PublicKeyBase64 string `json:"publicKeyBase64"`
 }
 
 type UnwrappedKey struct {
@@ -587,9 +588,10 @@ func (r *Runner) GenerateE2EESecret() (*SecretResult, error) {
 	}
 
 	return &SecretResult{
-		Secret:       secret,
-		Pin:          pin,
-		PublicKeyHex: hex.EncodeToString(pubBytes),
+		Secret:          secret,
+		Pin:             pin,
+		PublicKeyHex:    hex.EncodeToString(pubBytes),
+		PublicKeyBase64: base64.StdEncoding.EncodeToString(pubBytes),
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package line
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -84,6 +85,187 @@ func (c *Client) LoginV2WithVerifier(verifier string) (*LoginResult, error) {
 	}
 
 	return &wrapper.Data, nil
+}
+
+func (c *Client) CreateQRSession() (string, error) {
+	var wrapper struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			AuthSessionID string `json:"authSessionId"`
+		} `json:"data"`
+	}
+	if err := c.callQRRPC("SecondaryQrCodeLoginService", "createSession", "", "", &wrapper, struct{}{}); err != nil {
+		return "", err
+	}
+	if wrapper.Code != 0 {
+		return "", fmt.Errorf("createSession failed: %s", wrapper.Message)
+	}
+	return wrapper.Data.AuthSessionID, nil
+}
+
+func (c *Client) CreateQRCode(authSessionID string) (*QRCodeResponse, error) {
+	var wrapper struct {
+		Code    int            `json:"code"`
+		Message string         `json:"message"`
+		Data    QRCodeResponse `json:"data"`
+	}
+	req := struct {
+		AuthSessionID string `json:"authSessionId"`
+	}{AuthSessionID: authSessionID}
+	if err := c.callQRRPC("SecondaryQrCodeLoginService", "createQrCode", "", "", &wrapper, req); err != nil {
+		return nil, err
+	}
+	if wrapper.Code != 0 {
+		return nil, fmt.Errorf("createQrCode failed: %s", wrapper.Message)
+	}
+	return &wrapper.Data, nil
+}
+
+func (c *Client) CheckQRCodeVerified(authSessionID string) error {
+	return c.CheckQRCodeVerifiedContext(context.Background(), authSessionID)
+}
+
+func (c *Client) CheckQRCodeVerifiedContext(ctx context.Context, authSessionID string) error {
+	return c.checkQRPermitNotice(ctx, "checkQrCodeVerified", authSessionID, "150000")
+}
+
+func (c *Client) VerifyCertificate(authSessionID, certificate string) error {
+	var wrapper struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	req := struct {
+		AuthSessionID string `json:"authSessionId"`
+		Certificate   string `json:"certificate"`
+	}{AuthSessionID: authSessionID, Certificate: certificate}
+	if err := c.callQRRPC("SecondaryQrCodeLoginService", "verifyCertificate", "", "", &wrapper, req); err != nil {
+		return err
+	}
+	if wrapper.Code != 0 {
+		return fmt.Errorf("verifyCertificate failed: %s", wrapper.Message)
+	}
+	return nil
+}
+
+func (c *Client) CreatePinCode(authSessionID string) (string, error) {
+	var wrapper struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			PinCode string `json:"pinCode"`
+		} `json:"data"`
+	}
+	req := struct {
+		AuthSessionID string `json:"authSessionId"`
+	}{AuthSessionID: authSessionID}
+	if err := c.callQRRPC("SecondaryQrCodeLoginService", "createPinCode", "", "", &wrapper, req); err != nil {
+		return "", err
+	}
+	if wrapper.Code != 0 {
+		return "", fmt.Errorf("createPinCode failed: %s", wrapper.Message)
+	}
+	return wrapper.Data.PinCode, nil
+}
+
+func (c *Client) CheckPinCodeVerified(authSessionID string) error {
+	return c.CheckPinCodeVerifiedContext(context.Background(), authSessionID)
+}
+
+func (c *Client) CheckPinCodeVerifiedContext(ctx context.Context, authSessionID string) error {
+	return c.checkQRPermitNotice(ctx, "checkPinCodeVerified", authSessionID, "110000")
+}
+
+func (c *Client) QRCodeLoginV2(authSessionID string) (*LoginResult, error) {
+	var wrapper struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			LoginResult
+			LastBindTimestamp string `json:"lastBindTimestamp"`
+			MetaData          struct {
+				EncryptedKeyChain string `json:"encryptedKeyChain"`
+				E2EEVersion       string `json:"e2eeVersion"`
+				KeyID             string `json:"keyId"`
+				PublicKey         string `json:"publicKey"`
+			} `json:"metaData"`
+		} `json:"data"`
+	}
+	req := struct {
+		SystemName          string `json:"systemName"`
+		ModelName           string `json:"modelName"`
+		AutoLoginIsRequired bool   `json:"autoLoginIsRequired"`
+		AuthSessionID       string `json:"authSessionId"`
+	}{
+		SystemName:          "CHROMEOS",
+		ModelName:           "CHROME",
+		AutoLoginIsRequired: false,
+		AuthSessionID:       authSessionID,
+	}
+	if err := c.callQRRPC("SecondaryQrCodeLoginService", "qrCodeLoginV2", "", "", &wrapper, req); err != nil {
+		return nil, err
+	}
+	if wrapper.Code != 0 {
+		return nil, fmt.Errorf("qrCodeLoginV2 failed: %s", wrapper.Message)
+	}
+
+	res := wrapper.Data.LoginResult
+	res.LastPrimaryBindTime = wrapper.Data.LastBindTimestamp
+	res.EncryptedKeyChain = wrapper.Data.MetaData.EncryptedKeyChain
+	res.E2EEPublicKey = wrapper.Data.MetaData.PublicKey
+	res.E2EEVersion = wrapper.Data.MetaData.E2EEVersion
+	res.E2EEKeyID = wrapper.Data.MetaData.KeyID
+	if res.TokenV3IssueResult != nil && res.TokenV3IssueResult.AccessToken != "" {
+		res.AuthToken = res.TokenV3IssueResult.AccessToken
+		c.AccessToken = res.TokenV3IssueResult.AccessToken
+	} else if res.AuthToken != "" {
+		c.AccessToken = res.AuthToken
+	}
+	return &res, nil
+}
+
+func (c *Client) checkQRPermitNotice(ctx context.Context, method, authSessionID, longPollingTimeout string) error {
+	var wrapper struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	req := struct {
+		AuthSessionID string `json:"authSessionId"`
+	}{AuthSessionID: authSessionID}
+	if err := c.callQRRPCContext(ctx, "SecondaryQrCodeLoginPermitNoticeService", method, authSessionID, longPollingTimeout, &wrapper, req); err != nil {
+		return err
+	}
+	if wrapper.Code != 0 {
+		return fmt.Errorf("%s failed: %s", method, wrapper.Message)
+	}
+	return nil
+}
+
+func (c *Client) callQRRPC(service, method, authSessionID, longPollingTimeout string, out interface{}, args ...interface{}) error {
+	return c.callQRRPCContext(context.Background(), service, method, authSessionID, longPollingTimeout, out, args...)
+}
+
+func (c *Client) callQRRPCContext(ctx context.Context, service, method, authSessionID, longPollingTimeout string, out interface{}, args ...interface{}) error {
+	url := fmt.Sprintf("%s/%s/%s", QRLoginBaseURL, service, method)
+
+	bodyBytes, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("failed to marshal QR args: %w", err)
+	}
+
+	respBytes, err := c.postWithHMACOptions(url, bodyBytes, hmacPostOptions{
+		includeLineApplication: false,
+		sessionID:              authSessionID,
+		longPollingTimeout:     longPollingTimeout,
+		ctx:                    ctx,
+	})
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(respBytes, out); err != nil {
+		return fmt.Errorf("failed to parse %s response: %w", method, err)
+	}
+	return nil
 }
 
 // GetProfile fetches the user's profile information
