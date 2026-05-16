@@ -32,6 +32,7 @@ func (lc *LineClient) newMessageHandler() *handlers.Handler {
 		IsLoggedOut:       lc.isLoggedOut,
 		NewClient:         func() *line.Client { return line.NewClient(lc.AccessToken) },
 		DecryptMedia:      lc.decryptImageData,
+		IsAnimatedGif:     isAnimatedGif,
 	}
 }
 

@@ -251,6 +251,46 @@ func isAnimatedGif(data []byte) bool {
 	return false
 }
 
+// convertVideoToGIF converts video data (mp4/webm) to an animated GIF using ffmpeg.
+func convertVideoToGIF(videoData []byte) ([]byte, error) {
+	tmpVideoFile, err := os.CreateTemp("", "video-*.mp4")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp video file: %w", err)
+	}
+	defer os.Remove(tmpVideoFile.Name())
+
+	if _, err := tmpVideoFile.Write(videoData); err != nil {
+		tmpVideoFile.Close()
+		return nil, fmt.Errorf("failed to write video data: %w", err)
+	}
+	tmpVideoFile.Close()
+
+	tmpGIFFile, err := os.CreateTemp("", "gif-*.gif")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp GIF file: %w", err)
+	}
+	defer os.Remove(tmpGIFFile.Name())
+	tmpGIFFile.Close()
+
+	err = ffmpeg.Input(tmpVideoFile.Name()).
+		Output(tmpGIFFile.Name(), ffmpeg.KwArgs{
+			"vf": "fps=15,scale=320:-1:flags=lanczos",
+		}).
+		OverWriteOutput().
+		Silent(true).
+		Run()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg video-to-gif failed: %w", err)
+	}
+
+	gifData, err := os.ReadFile(tmpGIFFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to read GIF output: %w", err)
+	}
+
+	return gifData, nil
+}
+
 // generates the first frame of a video and resizes it to fit within 384x384
 func extractVideoThumbnail(videoData []byte) ([]byte, int, int, error) {
 	tmpVideoFile, err := os.CreateTemp("", "video-*.mp4")

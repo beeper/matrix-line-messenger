@@ -122,6 +122,14 @@ func (lc *LineClient) GetCapabilities(ctx context.Context, portal *bridgev2.Port
 					"audio/3gpp":  event.CapLevelFullySupported,
 				},
 			},
+			event.CapMsgGIF: {
+				Caption: event.CapLevelRejected,
+				MimeTypes: map[string]event.CapabilitySupportLevel{
+					"image/gif":  event.CapLevelFullySupported,
+					"video/mp4":  event.CapLevelFullySupported,
+					"video/webm": event.CapLevelFullySupported,
+				},
+			},
 		},
 	}
 }
