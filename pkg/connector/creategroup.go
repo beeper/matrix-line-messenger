@@ -50,11 +50,18 @@ func (lc *LineClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 
 	// Cache the member list so auto-registration can fall back to it
 	// when GetChats withMembers returns empty data.
+	groupMembers := make([]string, 0, len(participantMids)+1)
+	groupMembers = append(groupMembers, lc.Mid)
+	groupMembers = append(groupMembers, participantMids...)
 	lc.cacheMu.Lock()
 	if lc.groupMemberCache == nil {
 		lc.groupMemberCache = make(map[string][]string)
 	}
-	lc.groupMemberCache[chat.ChatMid] = participantMids
+	if lc.generatedGroupNameCache == nil {
+		lc.generatedGroupNameCache = make(map[string]bool)
+	}
+	lc.groupMemberCache[chat.ChatMid] = groupMembers
+	lc.generatedGroupNameCache[chat.ChatMid] = name == ""
 	lc.cacheMu.Unlock()
 
 	// Register E2EE group key so members can decrypt group messages.
@@ -105,6 +112,9 @@ func (lc *LineClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 
 	ct := database.RoomTypeGroupDM
 	chatName := name
+	if chatName == "" {
+		chatName = lc.generateNameFromMemberList(ctx, groupMembers)
+	}
 	if chatName == "" {
 		chatName = chat.ChatName
 	}

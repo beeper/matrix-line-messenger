@@ -30,13 +30,15 @@ type LineClient struct {
 	reqSeqMu    sync.Mutex
 	sentReqSeqs map[int]time.Time
 
-	// cacheMu protects peerKeys, contactCache, mediaFlowCache, noE2EEGroups, and groupMemberCache.
-	// Hold it only around map accesses — never across network calls.
-	cacheMu          sync.Mutex
-	noE2EEGroups     map[string]time.Time // chatMid -> when group E2EE failure was cached
-	contactCache     map[string]cachedContact
-	mediaFlowCache   map[string]cachedMediaFlow
-	groupMemberCache map[string][]string // chatMid -> list of member MIDs from CreateGroup or getChatMemberMIDs
+	// cacheMu protects peerKeys, contactCache, mediaFlowCache, noE2EEGroups,
+	// groupMemberCache, and generatedGroupNameCache.
+	// Hold it only around map accesses; never across network calls.
+	cacheMu                 sync.Mutex
+	noE2EEGroups            map[string]time.Time // chatMid -> when group E2EE failure was cached
+	contactCache            map[string]cachedContact
+	mediaFlowCache          map[string]cachedMediaFlow
+	groupMemberCache        map[string][]string // chatMid -> list of member MIDs from CreateGroup or getChatMemberMIDs
+	generatedGroupNameCache map[string]bool     // chatMid -> true when Matrix name should be generated from member names
 
 	wg sync.WaitGroup
 }
