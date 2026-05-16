@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"go.mau.fi/util/configupgrade"
+	"go.mau.fi/util/dbutil"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -24,6 +26,8 @@ type LineConnector struct {
 	br *bridgev2.Bridge
 }
 
+const beeperLineLoginID networkid.UserLoginID = "sh-line"
+
 var _ bridgev2.NetworkConnector = (*LineConnector)(nil)
 
 func (lc *LineConnector) Init(bridge *bridgev2.Bridge) {
@@ -35,7 +39,82 @@ func (lc *LineConnector) Start(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("matrix connector does not implement MatrixConnectorWithServer")
 	}
-	return nil
+	return lc.migrateLegacyLoginID(ctx)
+}
+
+func (lc *LineConnector) migrateLegacyLoginID(ctx context.Context) error {
+	migrate := func(ctx context.Context) error {
+		var legacyCount int
+		err := lc.br.DB.QueryRow(
+			ctx,
+			"SELECT COUNT(*) FROM user_login WHERE bridge_id=$1 AND id<>$2",
+			lc.br.DB.BridgeID, beeperLineLoginID,
+		).Scan(&legacyCount)
+		if err != nil {
+			return fmt.Errorf("failed to count legacy LINE logins: %w", err)
+		} else if legacyCount == 0 {
+			return nil
+		} else if legacyCount > 1 {
+			return fmt.Errorf("refusing to collapse %d LINE logins into %s", legacyCount, beeperLineLoginID)
+		}
+
+		var existingStableCount int
+		err = lc.br.DB.QueryRow(
+			ctx,
+			"SELECT COUNT(*) FROM user_login WHERE bridge_id=$1 AND id=$2",
+			lc.br.DB.BridgeID, beeperLineLoginID,
+		).Scan(&existingStableCount)
+		if err != nil {
+			return fmt.Errorf("failed to check stable LINE login ID: %w", err)
+		} else if existingStableCount > 0 {
+			return nil
+		}
+
+		var legacyID networkid.UserLoginID
+		err = lc.br.DB.QueryRow(
+			ctx,
+			"SELECT id FROM user_login WHERE bridge_id=$1 AND id<>$2 LIMIT 1",
+			lc.br.DB.BridgeID, beeperLineLoginID,
+		).Scan(&legacyID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil
+			}
+			return fmt.Errorf("failed to find legacy LINE login: %w", err)
+		}
+
+		lc.br.Log.Info().
+			Str("old_login_id", string(legacyID)).
+			Str("new_login_id", string(beeperLineLoginID)).
+			Msg("Migrating LINE login ID")
+
+		updates := []struct {
+			name  string
+			query string
+		}{
+			{"user_login", "UPDATE user_login SET id=$2 WHERE bridge_id=$1 AND id=$3"},
+			{"user_portal.login_id", "UPDATE user_portal SET login_id=$2 WHERE bridge_id=$1 AND login_id=$3"},
+			{"user_portal.portal_receiver", "UPDATE user_portal SET portal_receiver=$2 WHERE bridge_id=$1 AND portal_receiver=$3"},
+			{"portal.receiver", "UPDATE portal SET receiver=$2 WHERE bridge_id=$1 AND receiver=$3"},
+			{"portal.parent_receiver", "UPDATE portal SET parent_receiver=$2 WHERE bridge_id=$1 AND parent_receiver=$3"},
+			{"portal.relay_login_id", "UPDATE portal SET relay_login_id=$2 WHERE relay_bridge_id=$1 AND relay_login_id=$3"},
+			{"message.room_receiver", "UPDATE message SET room_receiver=$2 WHERE bridge_id=$1 AND room_receiver=$3"},
+			{"reaction.room_receiver", "UPDATE reaction SET room_receiver=$2 WHERE bridge_id=$1 AND room_receiver=$3"},
+			{"backfill_task.portal_receiver", "UPDATE backfill_task SET portal_receiver=$2 WHERE bridge_id=$1 AND portal_receiver=$3"},
+			{"backfill_task.user_login_id", "UPDATE backfill_task SET user_login_id=$2 WHERE bridge_id=$1 AND user_login_id=$3"},
+		}
+		for _, update := range updates {
+			if _, err = lc.br.DB.Exec(ctx, update.query, lc.br.DB.BridgeID, beeperLineLoginID, legacyID); err != nil {
+				return fmt.Errorf("failed to migrate %s from legacy LINE login ID: %w", update.name, err)
+			}
+		}
+		return nil
+	}
+
+	if lc.br.DB.Dialect == dbutil.SQLite {
+		return lc.br.DB.DoSQLiteTransactionWithoutForeignKeys(ctx, migrate)
+	}
+	return lc.br.DB.DoTxn(ctx, nil, migrate)
 }
 
 func (lc *LineConnector) GetBridgeInfoVersion() (info, capabilities int) {
@@ -363,10 +442,8 @@ func (ll *LineEmailLogin) finishLogin(ctx context.Context, res *line.LoginResult
 
 	ll.fetchLoginKeys(res, meta, client)
 
-	detectedLineID := networkid.UserLoginID(profile.Mid)
-
 	ul, err := ll.User.NewLogin(ctx, &database.UserLogin{
-		ID:         detectedLineID,
+		ID:         beeperLineLoginID,
 		RemoteName: displayName,
 		Metadata:   meta,
 	}, &bridgev2.NewLoginParams{
