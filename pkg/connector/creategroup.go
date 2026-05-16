@@ -57,14 +57,10 @@ func (lc *LineClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 	if lc.groupMemberCache == nil {
 		lc.groupMemberCache = make(map[string][]string)
 	}
-	if lc.groupPicturePathCache == nil {
-		lc.groupPicturePathCache = make(map[string]string)
-	}
 	if lc.generatedGroupNameCache == nil {
 		lc.generatedGroupNameCache = make(map[string]bool)
 	}
 	lc.groupMemberCache[chat.ChatMid] = groupMembers
-	lc.groupPicturePathCache[chat.ChatMid] = chat.PicturePath
 	lc.generatedGroupNameCache[chat.ChatMid] = name == ""
 	lc.cacheMu.Unlock()
 
@@ -127,9 +123,8 @@ func (lc *LineClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 		PortalKey: portalKey,
 		Portal:    portal,
 		PortalInfo: &bridgev2.ChatInfo{
-			Type:   &ct,
-			Name:   &chatName,
-			Avatar: lc.generatedGroupAvatar(ctx, chat.ChatMid, groupMembers),
+			Type: &ct,
+			Name: &chatName,
 			Members: &bridgev2.ChatMemberList{
 				IsFull:  true,
 				Members: members,

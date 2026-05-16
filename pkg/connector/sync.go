@@ -282,18 +282,11 @@ func (lc *LineClient) chatToChatInfo(ctx context.Context, chat *line.Chat, exclu
 		if lc.groupMemberCache == nil {
 			lc.groupMemberCache = make(map[string][]string)
 		}
-		if lc.groupPicturePathCache == nil {
-			lc.groupPicturePathCache = make(map[string]string)
-		}
 		if lc.generatedGroupNameCache == nil {
 			lc.generatedGroupNameCache = make(map[string]bool)
 		}
 		lc.groupMemberCache[chat.ChatMid] = groupMemberMids
-		lc.groupPicturePathCache[chat.ChatMid] = chat.PicturePath
 		lc.cacheMu.Unlock()
-	}
-	if avatar == nil && chat.Extra.GroupExtra != nil {
-		avatar = lc.generatedGroupAvatar(ctx, chat.ChatMid, groupMemberMids)
 	}
 
 	name := chat.ChatName
@@ -383,20 +376,17 @@ func (lc *LineClient) refreshGroupsForContact(ctx context.Context, mid string) {
 		chatMid       string
 		members       []string
 		generatedName bool
-		hasLineAvatar bool
 	}
 	var updates []groupUpdate
 
 	lc.cacheMu.Lock()
 	for chatMid, members := range lc.groupMemberCache {
-		hasLineAvatar := lc.groupPicturePathCache[chatMid] != ""
 		for _, member := range members {
 			if member == mid {
 				updates = append(updates, groupUpdate{
 					chatMid:       chatMid,
 					members:       append([]string(nil), members...),
 					generatedName: lc.generatedGroupNameCache[chatMid],
-					hasLineAvatar: hasLineAvatar,
 				})
 				break
 			}
@@ -412,11 +402,7 @@ func (lc *LineClient) refreshGroupsForContact(ctx context.Context, mid string) {
 				name = &generatedName
 			}
 		}
-		var avatar *bridgev2.Avatar
-		if !update.hasLineAvatar {
-			avatar = lc.generatedGroupAvatar(ctx, update.chatMid, update.members)
-		}
-		if name == nil && avatar == nil {
+		if name == nil {
 			continue
 		}
 		portalKey := networkid.PortalKey{ID: makePortalID(update.chatMid), Receiver: lc.UserLogin.ID}
@@ -428,8 +414,7 @@ func (lc *LineClient) refreshGroupsForContact(ctx context.Context, mid string) {
 			},
 			ChatInfoChange: &bridgev2.ChatInfoChange{
 				ChatInfo: &bridgev2.ChatInfo{
-					Name:   name,
-					Avatar: avatar,
+					Name: name,
 				},
 			},
 		})
@@ -824,19 +809,6 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 				return lc.GetAvatar(ctx, networkid.AvatarID(chat.PicturePath))
 			},
 		}
-	} else if chat.Extra.GroupExtra != nil {
-		lc.cacheMu.Lock()
-		members := append([]string(nil), lc.groupMemberCache[chat.ChatMid]...)
-		lc.cacheMu.Unlock()
-		avatar = lc.generatedGroupAvatar(ctx, chat.ChatMid, members)
-	}
-	if chat.Extra.GroupExtra != nil {
-		lc.cacheMu.Lock()
-		if lc.groupPicturePathCache == nil {
-			lc.groupPicturePathCache = make(map[string]string)
-		}
-		lc.groupPicturePathCache[chat.ChatMid] = chat.PicturePath
-		lc.cacheMu.Unlock()
 	}
 
 	// Use ChatInfoChange to only update avatar (and other non-name metadata).
