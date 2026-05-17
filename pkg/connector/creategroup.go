@@ -29,16 +29,13 @@ func (lc *LineClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 	client := line.NewClient(lc.AccessToken)
 	var chat *line.Chat
 	var err error
-	chatType := 0 // GROUP
-	switch params.Type {
-	case "room":
-		chatType = 1 // ROOM
-	}
-	chat, err = client.CreateChat(participantMids, name, chatType)
+	chatType := 1 // ROOM: members join automatically.
+	lineName := name
+	chat, err = client.CreateChat(participantMids, lineName, chatType)
 	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
 		if errRecover := lc.recoverToken(ctx); errRecover == nil {
 			client = line.NewClient(lc.AccessToken)
-			chat, err = client.CreateChat(participantMids, name, chatType)
+			chat, err = client.CreateChat(participantMids, lineName, chatType)
 		}
 	}
 	if err != nil {
@@ -53,11 +50,18 @@ func (lc *LineClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 
 	// Cache the member list so auto-registration can fall back to it
 	// when GetChats withMembers returns empty data.
+	groupMembers := make([]string, 0, len(participantMids)+1)
+	groupMembers = append(groupMembers, lc.Mid)
+	groupMembers = append(groupMembers, participantMids...)
 	lc.cacheMu.Lock()
 	if lc.groupMemberCache == nil {
 		lc.groupMemberCache = make(map[string][]string)
 	}
-	lc.groupMemberCache[chat.ChatMid] = participantMids
+	if lc.generatedGroupNameCache == nil {
+		lc.generatedGroupNameCache = make(map[string]bool)
+	}
+	lc.groupMemberCache[chat.ChatMid] = groupMembers
+	lc.generatedGroupNameCache[chat.ChatMid] = name == ""
 	lc.cacheMu.Unlock()
 
 	// Register E2EE group key so members can decrypt group messages.
@@ -107,9 +111,12 @@ func (lc *LineClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCre
 	}
 
 	ct := database.RoomTypeGroupDM
-	chatName := chat.ChatName
+	chatName := name
 	if chatName == "" {
-		chatName = name
+		chatName = lc.generateNameFromMemberList(ctx, groupMembers)
+	}
+	if chatName == "" {
+		chatName = chat.ChatName
 	}
 
 	return &bridgev2.CreateChatResponse{

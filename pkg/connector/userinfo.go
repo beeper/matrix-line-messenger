@@ -148,7 +148,7 @@ func (lc *LineClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) 
 		if len(res.Chats) == 0 {
 			return nil, fmt.Errorf("chat not found")
 		}
-		return lc.chatToChatInfo(&res.Chats[0], true), nil
+		return lc.chatToChatInfo(ctx, &res.Chats[0], true), nil
 	}
 
 	contact := lc.getContact(ctx, string(portal.ID))
