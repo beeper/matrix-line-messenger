@@ -117,6 +117,16 @@ func (r *Runner) getKey(id int) (uint32, error) {
 	return ptr, nil
 }
 
+func (r *Runner) KeyGenerate() (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ptr, err := r.rt.Curve25519KeyGenerate()
+	if err != nil {
+		return 0, err
+	}
+	return r.putKey(ptr), nil
+}
+
 func (r *Runner) putChannel(ptr uint32) int {
 	id := r.nextID
 	r.nextID++
@@ -347,6 +357,8 @@ func (r *Runner) LoginUnwrapKeyChainWithKey(loginKeyID int, serverPubB64, encryp
 }
 
 // KeyLoad loads a base64 E2EE key and returns an internal key ID.
+// Also stores the decoded key bytes as a Go key entry so ChannelCreate can
+// create a pure Go Channel (required for group shared key wrapping).
 func (r *Runner) KeyLoad(b64Key string) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -361,7 +373,14 @@ func (r *Runner) KeyLoad(b64Key string) (int, error) {
 		return 0, err
 	}
 
-	return r.putKey(keyPtr), nil
+	id := r.putKey(keyPtr)
+	// Store raw key bytes so ChannelCreate can derive a pure Go Channel.
+	// The exported key format from E2EEKeyExportKey is the raw 32-byte
+	// Curve25519 private key (same format stored by LINEJS clients).
+	if len(keyBytes) == 32 {
+		r.goKeys[id] = &goKeyEntry{privKey: keyBytes}
+	}
+	return id, nil
 }
 
 // KeyGetID returns the raw key ID for a loaded key.
@@ -425,7 +444,15 @@ func (r *Runner) ChannelCreate(keyID int, peerPublicB64 string) (int, error) {
 		goChan, err := ltsm.NewChannel(goKey.privKey, peerPubBytes)
 		if err == nil {
 			r.goChannels[id] = goChan
+		} else {
+			fmt.Printf("DEBUG ChannelCreate: NewChannel failed: %v (keyID=%d len(privKey)=%d)\n", err, keyID, len(goKey.privKey))
 		}
+	} else {
+		fmt.Printf("DEBUG ChannelCreate: no goKey for keyID=%d (goKeys has keys: ", keyID)
+		for k := range r.goKeys {
+			fmt.Printf("%d ", k)
+		}
+		fmt.Printf(")\n")
 	}
 
 	return id, nil
@@ -671,6 +698,57 @@ func (r *Runner) GenerateConfirmHash(serverPublicKeyB64, encryptedKeyChainB64 st
 	}
 
 	return base64.StdEncoding.EncodeToString(hashBytes), nil
+}
+
+// ReadChannelRaw returns 128 bytes of the channel C++ object's WASM linear memory.
+// Used for debugging the shared secret offset in the E2EEChannel/Curve25519KeyChannel object.
+func (r *Runner) ReadChannelRaw(channelID int) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	chanPtr, err := r.getChannel(channelID)
+	if err != nil {
+		return nil, err
+	}
+
+	mem := r.rt.ModuleMem()
+	if int(chanPtr)+128 > len(mem) {
+		return nil, fmt.Errorf("channel ptr %d out of bounds (mem %d bytes)", chanPtr, len(mem))
+	}
+	buf := make([]byte, 128)
+	copy(buf, mem[chanPtr:chanPtr+128])
+	return buf, nil
+}
+
+// ChannelWrapGroupSharedKey wraps a group key using the channel's ECDH shared secret.
+// Uses the WASM module's wrapGroupSharedKey method directly (same approach as the LINE
+// Chrome Extension). The keyID must reference a WASM-generated E2EEKey object
+// (from KeyGenerate), not raw bytes.
+//
+// Returns base64-encoded ciphertext ready for registerE2EEGroupKey.
+func (r *Runner) ChannelWrapGroupSharedKey(channelID int, keyID int) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	chanPtr, err := r.getChannel(channelID)
+	if err != nil {
+		return "", err
+	}
+
+	keyPtr, err := r.getKey(keyID)
+	if err != nil {
+		return "", err
+	}
+
+	// Use the WASM module's wrapGroupSharedKey directly (same as LINE Extension).
+	// keyPtr is an emval handle wrapping the Curve25519Key C++ object.
+	// The C++ method expects an emscripten::val, which the emval handle represents.
+	wrapped, err := r.rt.E2EEChannelWrapGroupSharedKey(chanPtr, keyPtr)
+	if err != nil {
+		return "", err
+	}
+
+	return base64.StdEncoding.EncodeToString(wrapped), nil
 }
 
 // --- Pure Go helpers (no WASM dependency) ---

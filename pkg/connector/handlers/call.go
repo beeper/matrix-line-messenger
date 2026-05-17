@@ -14,8 +14,10 @@ import (
 // ConvertCall converts a LINE call event to a Matrix notice message.
 func (h *Handler) ConvertCall(data line.Message, relatesTo *event.RelatesTo) (*bridgev2.ConvertedMessage, error) {
 	callType := "Voice"
+	beeperCallType := event.BeeperActionMessageCallTypeVoice
 	if data.ContentMetadata["TYPE"] == "V" {
 		callType = "Video"
+		beeperCallType = event.BeeperActionMessageCallTypeVideo
 	}
 
 	durationMs, _ := strconv.Atoi(data.ContentMetadata["DURATION"])
@@ -46,6 +48,10 @@ func (h *Handler) ConvertCall(data line.Message, relatesTo *event.RelatesTo) (*b
 					MsgType:   event.MsgNotice,
 					Body:      body,
 					RelatesTo: relatesTo,
+					BeeperActionMessage: &event.BeeperActionMessage{
+						Type:     event.BeeperActionMessageCall,
+						CallType: beeperCallType,
+					},
 				},
 			},
 		},

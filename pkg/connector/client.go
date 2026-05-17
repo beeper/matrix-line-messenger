@@ -31,12 +31,15 @@ type LineClient struct {
 	sentReqSeqs map[int]time.Time
 	tokenMu     sync.Mutex
 
-	// cacheMu protects peerKeys, contactCache, mediaFlowCache, and noE2EEGroups.
-	// Hold it only around map accesses — never across network calls.
-	cacheMu        sync.Mutex
-	noE2EEGroups   map[string]time.Time // chatMid -> when group E2EE failure was cached
-	contactCache   map[string]cachedContact
-	mediaFlowCache map[string]cachedMediaFlow
+	// cacheMu protects peerKeys, contactCache, mediaFlowCache, noE2EEGroups,
+	// groupMemberCache, and generatedGroupNameCache.
+	// Hold it only around map accesses; never across network calls.
+	cacheMu                 sync.Mutex
+	noE2EEGroups            map[string]time.Time // chatMid -> when group E2EE failure was cached
+	contactCache            map[string]cachedContact
+	mediaFlowCache          map[string]cachedMediaFlow
+	groupMemberCache        map[string][]string // chatMid -> list of member MIDs from CreateGroup or getChatMemberMIDs
+	generatedGroupNameCache map[string]bool     // chatMid -> true when Matrix name should be generated from member names
 
 	wg sync.WaitGroup
 }
@@ -112,6 +115,7 @@ func (lc *LineClient) shouldUseE2EEMediaFlow(chatMid string, contentType int) bo
 }
 
 var _ bridgev2.NetworkAPI = (*LineClient)(nil)
+var _ bridgev2.NetworkAPIWithUserID = (*LineClient)(nil)
 var _ bridgev2.ReadReceiptHandlingNetworkAPI = (*LineClient)(nil)
 var _ bridgev2.ReactionHandlingNetworkAPI = (*LineClient)(nil)
 
@@ -181,6 +185,9 @@ func (lc *LineClient) Connect(ctx context.Context) {
 	}
 	if lc.contactCache == nil {
 		lc.contactCache = make(map[string]cachedContact)
+	}
+	if lc.groupMemberCache == nil {
+		lc.groupMemberCache = make(map[string][]string)
 	}
 	lc.cacheMu.Unlock()
 	lc.reqSeqMu.Lock()
@@ -375,6 +382,10 @@ func (lc *LineClient) Disconnect() {
 }
 
 func (lc *LineClient) IsLoggedIn() bool { return lc.AccessToken != "" }
+
+func (lc *LineClient) GetUserID() networkid.UserID {
+	return makeUserID(lc.Mid)
+}
 
 func (lc *LineClient) LogoutRemote(ctx context.Context) {}
 
