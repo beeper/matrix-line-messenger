@@ -656,6 +656,36 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 	}
 
 	switch opType {
+	case OpBlockContact:
+		mid := op.Param1
+		lc.cacheMu.Lock()
+		lc.blockedUsers[mid] = true
+		lc.cacheMu.Unlock()
+		lc.UserLogin.Bridge.Log.Info().Str("mid", mid).Msg("Contact blocked")
+		portalKey := networkid.PortalKey{ID: makePortalID(mid), Receiver: lc.UserLogin.ID}
+		lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatResync,
+				PortalKey: portalKey,
+				Timestamp: time.Now(),
+			},
+		})
+
+	case OpUnblockContact:
+		mid := op.Param1
+		lc.cacheMu.Lock()
+		delete(lc.blockedUsers, mid)
+		lc.cacheMu.Unlock()
+		lc.UserLogin.Bridge.Log.Info().Str("mid", mid).Msg("Contact unblocked")
+		portalKey := networkid.PortalKey{ID: makePortalID(mid), Receiver: lc.UserLogin.ID}
+		lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatResync,
+				PortalKey: portalKey,
+				Timestamp: time.Now(),
+			},
+		})
+
 	case OpContactUpdate:
 		mid := op.Param1
 		lc.cacheMu.Lock()
