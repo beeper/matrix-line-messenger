@@ -39,6 +39,7 @@ type LineClient struct {
 	mediaFlowCache          map[string]cachedMediaFlow
 	groupMemberCache        map[string][]string // chatMid -> list of member MIDs from CreateGroup or getChatMemberMIDs
 	generatedGroupNameCache map[string]bool     // chatMid -> true when Matrix name should be generated from member names
+	reactionIconMXC         map[int]string      // predefinedReactionType -> cached MXC URI
 
 	wg sync.WaitGroup
 }
@@ -177,6 +178,9 @@ func (lc *LineClient) Connect(ctx context.Context) {
 	}
 	if lc.groupMemberCache == nil {
 		lc.groupMemberCache = make(map[string][]string)
+	}
+	if lc.reactionIconMXC == nil {
+		lc.reactionIconMXC = make(map[int]string)
 	}
 	lc.cacheMu.Unlock()
 	lc.reqSeqMu.Lock()

@@ -18,7 +18,8 @@ type ReactionPayload struct {
 }
 
 type ReactionDetail struct {
-	PaidReactionType *PaidReactionType `json:"paidReactionType,omitempty"`
+	PaidReactionType       *PaidReactionType `json:"paidReactionType,omitempty"`
+	PredefinedReactionType *int              `json:"predefinedReactionType,omitempty"`
 }
 
 type PaidReactionType struct {
@@ -26,6 +27,26 @@ type PaidReactionType struct {
 	EmojiID      string `json:"emojiId"`
 	ResourceType int    `json:"resourceType"`
 	Version      int    `json:"version"`
+}
+
+// PredefinedReactionEmoji maps LINE predefinedReactionType values to Unicode emoji.
+var PredefinedReactionEmoji = map[int]string{
+	2: "\U0001F44D",   // 👍 LIKE
+	3: "\u2764\uFE0F", // ❤️ LOVE
+	4: "\U0001F606",   // 😆 LAUGH
+	5: "\U0001F62E",   // 😮 SURPRISE
+	6: "\U0001F622",   // 😢 SAD
+	7: "\U0001F621",   // 😡 ANGRY
+}
+
+// PredefinedReactionName maps predefinedReactionType values to human-readable names.
+var PredefinedReactionName = map[int]string{
+	2: "LIKE",
+	3: "LOVE",
+	4: "LAUGH",
+	5: "SURPRISE",
+	6: "SAD",
+	7: "ANGRY",
 }
 
 func ParseReactionParam2(data string) (*ReactionPayload, error) {

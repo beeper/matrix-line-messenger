@@ -776,6 +776,25 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 			TargetMessage: networkid.MessageID(msgID),
 		})
 
+	case OpPredefinedReaction:
+		lc.wg.Add(1)
+		go func() {
+			defer lc.wg.Done()
+
+			param2, err := line.ParseReactionParam2(op.Param2)
+			if err != nil {
+				lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to parse predefined reaction param2")
+				return
+			}
+			if param2.Curr == nil || param2.Curr.PredefinedReactionType == nil {
+				lc.UserLogin.Bridge.Log.Error().Msg("No current predefined reaction type found")
+				return
+			}
+
+			prt := *param2.Curr.PredefinedReactionType
+			lc.handlePredefinedReaction(ctx, op, param2.ChatMid, prt)
+		}()
+
 	case OpReaction:
 		lc.wg.Add(1)
 		go func() {
@@ -786,8 +805,20 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 				lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to parse reaction param2")
 				return
 			}
-			if param2.Curr == nil || param2.Curr.PaidReactionType == nil {
-				lc.UserLogin.Bridge.Log.Error().Msg("No current reaction or paid reaction type found")
+			if param2.Curr == nil {
+				lc.UserLogin.Bridge.Log.Error().Msg("No current reaction type found")
+				return
+			}
+
+			// Handle predefined reactions sent via type 140 operations
+			if param2.Curr.PaidReactionType == nil && param2.Curr.PredefinedReactionType != nil {
+				prt := *param2.Curr.PredefinedReactionType
+				lc.handlePredefinedReaction(ctx, op, param2.ChatMid, prt)
+				return
+			}
+
+			if param2.Curr.PaidReactionType == nil {
+				lc.UserLogin.Bridge.Log.Error().Msg("No paid reaction type found")
 				return
 			}
 
@@ -883,6 +914,58 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 		}
 		logEvt.Msg("Unhandled SSE operation")
 	}
+}
+
+func (lc *LineClient) handlePredefinedReaction(ctx context.Context, op line.Operation, chatMid string, prt int) {
+	if prt < 2 || prt > 7 {
+		lc.UserLogin.Bridge.Log.Error().Int("predefined_reaction_type", prt).Msg("Unknown predefined reaction type")
+		return
+	}
+
+	senderID := makeUserID(op.Param3)
+	if op.Param3 == "" {
+		senderID = makeUserID(chatMid)
+	}
+
+	portalKey := networkid.PortalKey{ID: makePortalID(chatMid), Receiver: lc.UserLogin.ID}
+
+	lc.cacheMu.Lock()
+	mxc, ok := lc.reactionIconMXC[prt]
+	lc.cacheMu.Unlock()
+
+	if !ok || mxc == "" {
+		pngData, err := getReactionIconData(prt)
+		if err != nil {
+			lc.UserLogin.Bridge.Log.Error().Err(err).Int("prt", prt).Msg("Failed to get reaction icon data")
+			return
+		}
+
+		uploadedMXC, _, err := lc.UserLogin.Bridge.Bot.UploadMedia(ctx, "", pngData, "reaction.png", "image/png")
+		if err != nil {
+			lc.UserLogin.Bridge.Log.Error().Err(err).Int("prt", prt).Msg("Failed to upload reaction icon to Matrix")
+			return
+		}
+		mxc = string(uploadedMXC)
+
+		lc.cacheMu.Lock()
+		if lc.reactionIconMXC == nil {
+			lc.reactionIconMXC = make(map[int]string)
+		}
+		lc.reactionIconMXC[prt] = mxc
+		lc.cacheMu.Unlock()
+	}
+
+	ts, _ := op.CreatedTime.Int64()
+	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.Reaction{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventReaction,
+			PortalKey: portalKey,
+			Timestamp: time.UnixMilli(ts),
+			Sender:    bridgev2.EventSender{Sender: senderID},
+		},
+		TargetMessage: networkid.MessageID(op.Param1),
+		Emoji:         mxc,
+	})
 }
 
 func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {

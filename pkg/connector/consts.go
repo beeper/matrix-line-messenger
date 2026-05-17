@@ -20,6 +20,7 @@ const (
 	OpCancelInvitation       OperationType = 126
 	OpDeleteSelfFromChat     OperationType = 127
 	OpDeleteOtherFromChat    OperationType = 132
+	OpPredefinedReaction     OperationType = 139
 	OpReaction               OperationType = 140
 )
 
