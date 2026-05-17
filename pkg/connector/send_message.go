@@ -528,10 +528,12 @@ func (lc *LineClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 					} else {
 						chunks, err = lc.E2EE.EncryptGroupMessage(portalMid, fromMid, msg.Content.Body)
 					}
-				} else if line.IsNoUsableE2EEGroupKey(errFetch) || line.IsNoUsableE2EEGroupKey(err) {
-					// Group has no E2EE keys — fall back to plain text
+				}
+				if err != nil {
+					// E2EE setup failed — fall back to plain text
 					lc.markGroupNoE2EE(portalMid)
-					lc.UserLogin.Bridge.Log.Info().Str("chat_mid", portalMid).Msg("Group has no E2EE keys, falling back to plain text")
+					lc.UserLogin.Bridge.Log.Warn().Err(err).Str("chat_mid", portalMid).
+						Msg("Failed to set up E2EE for group, falling back to plain text")
 					plainText = true
 					chunks = nil
 					err = nil
@@ -539,7 +541,6 @@ func (lc *LineClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 					if contentType == int(ContentText) {
 						plainTextBody = msg.Content.Body
 					} else {
-						// Media was uploaded to E2EE endpoint — need to re-upload via plain after sending
 						delete(contentMetadata, "OID")
 						delete(contentMetadata, "SID")
 						delete(contentMetadata, "ENC_KM")
@@ -681,6 +682,40 @@ func (lc *LineClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 		lc.reqSeqMu.Unlock()
 
 		sentMsg, err = client.SendMessage(int64(retryReqSeq), lineMsg)
+	}
+
+	// If LINE rejects with "group key is not registered" (code 99),
+	// auto-register a group key and retry the send once.
+	if err != nil && isGroup && line.IsGroupKeyNotRegisteredError(err) {
+		lc.UserLogin.Bridge.Log.Info().Str("chat_mid", portalMid).
+			Msg("SendMessage failed: group key not registered, registering and retrying")
+		if regErr := lc.autoRegisterGroupKey(ctx, portalMid); regErr == nil {
+			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", portalMid).
+				Msg("autoRegisterGroupKey succeeded, retrying send")
+			if !plainText && lc.E2EE != nil {
+				if fetchErr := lc.fetchAndUnwrapGroupKey(ctx, portalMid, 0); fetchErr == nil {
+					if contentType != int(ContentText) {
+						chunks, err = lc.E2EE.EncryptGroupMessageRaw(portalMid, fromMid, contentType, payload)
+					} else {
+						chunks, err = lc.E2EE.EncryptGroupMessage(portalMid, fromMid, msg.Content.Body)
+					}
+					if err == nil {
+						lineMsg.Chunks = chunks
+						lineMsg.Text = ""
+					}
+				}
+			}
+			if err == nil {
+				retryReqSeq := int(time.Now().UnixMilli() % 1_000_000_000)
+				lc.reqSeqMu.Lock()
+				lc.sentReqSeqs[retryReqSeq] = time.Now()
+				lc.reqSeqMu.Unlock()
+				sentMsg, err = client.SendMessage(int64(retryReqSeq), lineMsg)
+			}
+		} else {
+			lc.UserLogin.Bridge.Log.Warn().Str("chat_mid", portalMid).
+				Err(regErr).Msg("autoRegisterGroupKey failed, giving up on retry")
+		}
 	}
 
 	if err != nil {

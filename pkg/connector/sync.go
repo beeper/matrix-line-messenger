@@ -140,6 +140,9 @@ func (lc *LineClient) prefetchMessages(ctx context.Context) {
 		// Reverse messages to process oldest first
 		for i := len(msgs) - 1; i >= 0; i-- {
 			msg := msgs[i]
+			if msg.ContentType == 18 {
+				lc.cacheGroupMembersFromSystemMessage(msg)
+			}
 
 			existing, err := lc.UserLogin.Bridge.DB.Message.GetPartByID(ctx, lc.UserLogin.ID, networkid.MessageID(msg.ID), "")
 			if err == nil && existing != nil {
@@ -198,7 +201,7 @@ func (lc *LineClient) syncChats(ctx context.Context) {
 		for _, chat := range chatsResp.Chats {
 			portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
 
-			info := lc.chatToChatInfo(&chat, true)
+			info := lc.chatToChatInfo(ctx, &chat, true)
 			lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
 				EventMeta: simplevent.EventMeta{
 					Type:      bridgev2.RemoteEventChatResync,
@@ -211,7 +214,7 @@ func (lc *LineClient) syncChats(ctx context.Context) {
 	}
 }
 
-func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) *bridgev2.ChatInfo {
+func (lc *LineClient) chatToChatInfo(ctx context.Context, chat *line.Chat, excludeFromTimeline bool) *bridgev2.ChatInfo {
 	var avatar *bridgev2.Avatar
 	if chat.PicturePath != "" {
 		avatar = &bridgev2.Avatar{
@@ -233,6 +236,7 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 		},
 	}
 
+	var groupMemberMids []string
 	if chat.Extra.GroupExtra != nil {
 		if chat.Extra.GroupExtra.CreatorMid == lc.Mid {
 			members[0].PowerLevel = ptr.Ptr(100)
@@ -245,10 +249,15 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 				members[0].Membership = event.MembershipInvite
 			}
 		}
+
+		// Populate group member cache for fallback use when GetChats
+		// returns empty MemberMids (known LINE API issue).
+		allMemberMids := make([]string, 0, len(chat.Extra.GroupExtra.MemberMids))
 		for m := range chat.Extra.GroupExtra.MemberMids {
 			if m == lc.Mid || m == string(lc.UserLogin.ID) || strings.HasPrefix(m, "c") || strings.HasPrefix(m, "r") {
 				continue
 			}
+			allMemberMids = append(allMemberMids, m)
 			members = append(members, bridgev2.ChatMember{
 				EventSender: bridgev2.EventSender{
 					Sender: makeUserID(m),
@@ -260,18 +269,59 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 			if m == lc.Mid || m == string(lc.UserLogin.ID) || strings.HasPrefix(m, "c") || strings.HasPrefix(m, "r") {
 				continue
 			}
+			allMemberMids = append(allMemberMids, m)
+			membership := event.MembershipInvite
+			if chat.Type == 1 {
+				membership = event.MembershipJoin
+			}
 			members = append(members, bridgev2.ChatMember{
 				EventSender: bridgev2.EventSender{
 					Sender: makeUserID(m),
 				},
-				Membership: event.MembershipInvite,
+				Membership: membership,
 			})
 		}
+		if len(allMemberMids) == 0 {
+			lc.cacheGroupMembersFromRecentMessages(ctx, chat.ChatMid)
+			for _, m := range lc.getCachedGroupMembers(chat.ChatMid) {
+				if m == lc.Mid || m == string(lc.UserLogin.ID) || strings.HasPrefix(m, "c") || strings.HasPrefix(m, "r") {
+					continue
+				}
+				allMemberMids = append(allMemberMids, m)
+				members = append(members, bridgev2.ChatMember{
+					EventSender: bridgev2.EventSender{
+						Sender: makeUserID(m),
+					},
+					Membership: event.MembershipJoin,
+				})
+			}
+		}
+
+		groupMemberMids = make([]string, 0, len(allMemberMids)+1)
+		groupMemberMids = append(groupMemberMids, lc.Mid)
+		groupMemberMids = append(groupMemberMids, allMemberMids...)
+		lc.cacheMu.Lock()
+		if lc.groupMemberCache == nil {
+			lc.groupMemberCache = make(map[string][]string)
+		}
+		if lc.generatedGroupNameCache == nil {
+			lc.generatedGroupNameCache = make(map[string]bool)
+		}
+		lc.groupMemberCache[chat.ChatMid] = groupMemberMids
+		lc.cacheMu.Unlock()
 	}
 
 	name := chat.ChatName
+	if chat.Extra.GroupExtra != nil && chat.Type == 1 {
+		lc.cacheMu.Lock()
+		generateName := lc.generatedGroupNameCache[chat.ChatMid]
+		lc.cacheMu.Unlock()
+		if generateName && len(groupMemberMids) > 1 {
+			name = lc.generateNameFromMemberList(ctx, groupMemberMids)
+		}
+	}
 	if name == "" && chat.Extra.GroupExtra != nil {
-		name = lc.generateNameFromMembers(chat.Extra.GroupExtra.MemberMids)
+		name = lc.generateNameFromMemberList(ctx, groupMemberMids)
 	}
 
 	ct := database.RoomTypeGroupDM
@@ -292,18 +342,22 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 	}
 }
 
-func (lc *LineClient) generateNameFromMembers(members map[string]bool) string {
+func (lc *LineClient) generateNameFromMemberList(ctx context.Context, members []string) string {
 	var names []string
 	count := 0
-	for mid := range members {
+	seen := make(map[string]struct{}, len(members))
+	for _, mid := range members {
 		if mid == string(lc.UserLogin.ID) || mid == lc.Mid || strings.HasPrefix(mid, "c") || strings.HasPrefix(mid, "r") {
 			continue
 		}
-		lc.cacheMu.Lock()
-		cached, ok := lc.contactCache[mid]
-		lc.cacheMu.Unlock()
-		if ok && cached.DisplayName != "" {
-			names = append(names, cached.DisplayName)
+		if _, ok := seen[mid]; ok {
+			continue
+		}
+		seen[mid] = struct{}{}
+		contact := lc.getContact(ctx, mid)
+		name := contact.EffectiveDisplayName()
+		if name != "" && name != mid {
+			names = append(names, name)
 		}
 		count++
 		if count >= 20 {
@@ -322,8 +376,13 @@ func (lc *LineClient) generateNameFromMembers(members map[string]bool) string {
 
 	result := strings.Join(finalNames, ", ")
 	actualMemberCount := 0
-	for m := range members {
-		if m != string(lc.UserLogin.ID) && m != lc.Mid && !strings.HasPrefix(m, "c") && !strings.HasPrefix(m, "r") {
+	seen = make(map[string]struct{}, len(members))
+	for _, m := range members {
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		if m != string(lc.UserLogin.ID) && !strings.HasPrefix(m, "c") && !strings.HasPrefix(m, "r") {
 			actualMemberCount++
 		}
 	}
@@ -332,6 +391,155 @@ func (lc *LineClient) generateNameFromMembers(members map[string]bool) string {
 		result += fmt.Sprintf(" and %d others", remaining)
 	}
 	return result
+}
+
+func (lc *LineClient) getCachedGroupMembers(chatMid string) []string {
+	lc.cacheMu.Lock()
+	defer lc.cacheMu.Unlock()
+	members := lc.groupMemberCache[chatMid]
+	if len(members) == 0 {
+		return nil
+	}
+	return append([]string(nil), members...)
+}
+
+func (lc *LineClient) cacheGroupMembersFromSystemMessage(msg *line.Message) {
+	if msg == nil || msg.ContentMetadata == nil {
+		return
+	}
+	chatMid := msg.To
+	if !isChatMID(chatMid) {
+		return
+	}
+	locKey := msg.ContentMetadata["LOC_KEY"]
+	switch locKey {
+	case "C_GI", "C_MI", "A_MI", "A_MC":
+	default:
+		return
+	}
+
+	seen := map[string]struct{}{
+		lc.Mid: {},
+	}
+	for _, mid := range lc.getCachedGroupMembers(chatMid) {
+		seen[mid] = struct{}{}
+	}
+	for _, mid := range midsFromSystemLocArgs(msg.ContentMetadata["LOC_ARGS"]) {
+		seen[mid] = struct{}{}
+	}
+	if len(seen) <= 1 {
+		return
+	}
+
+	members := make([]string, 0, len(seen))
+	for mid := range seen {
+		members = append(members, mid)
+	}
+	lc.cacheMu.Lock()
+	if lc.groupMemberCache == nil {
+		lc.groupMemberCache = make(map[string][]string)
+	}
+	lc.groupMemberCache[chatMid] = members
+	lc.cacheMu.Unlock()
+}
+
+func (lc *LineClient) cacheGroupMembersFromRecentMessages(ctx context.Context, chatMid string) {
+	if len(lc.getCachedGroupMembers(chatMid)) > 1 {
+		return
+	}
+	client := line.NewClient(lc.AccessToken)
+	msgs, err := client.GetRecentMessagesV2(chatMid, 50)
+	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
+		if errRecover := lc.recoverToken(ctx); errRecover == nil {
+			client = line.NewClient(lc.AccessToken)
+			msgs, err = client.GetRecentMessagesV2(chatMid, 50)
+		}
+	}
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Debug().Err(err).Str("chat_mid", chatMid).Msg("Failed to fetch recent messages for group member cache")
+		return
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if msg.ContentType == 18 {
+			lc.cacheGroupMembersFromSystemMessage(msg)
+		}
+	}
+}
+
+func midsFromSystemLocArgs(locArgs string) []string {
+	fields := strings.FieldsFunc(locArgs, func(r rune) bool {
+		return r == '\x1e' || r == '\x1f'
+	})
+	mids := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if isUserMID(field) {
+			mids = append(mids, field)
+		}
+	}
+	return mids
+}
+
+func isUserMID(mid string) bool {
+	return len(mid) > 1 && strings.HasPrefix(mid, "U")
+}
+
+func isChatMID(mid string) bool {
+	if mid == "" {
+		return false
+	}
+	lower := strings.ToLower(mid)
+	return strings.HasPrefix(lower, "c") || strings.HasPrefix(lower, "r")
+}
+
+func (lc *LineClient) refreshGroupsForContact(ctx context.Context, mid string) {
+	type groupUpdate struct {
+		chatMid       string
+		members       []string
+		generatedName bool
+	}
+	var updates []groupUpdate
+
+	lc.cacheMu.Lock()
+	for chatMid, members := range lc.groupMemberCache {
+		for _, member := range members {
+			if member == mid {
+				updates = append(updates, groupUpdate{
+					chatMid:       chatMid,
+					members:       append([]string(nil), members...),
+					generatedName: lc.generatedGroupNameCache[chatMid],
+				})
+				break
+			}
+		}
+	}
+	lc.cacheMu.Unlock()
+
+	for _, update := range updates {
+		var name *string
+		if update.generatedName {
+			generatedName := lc.generateNameFromMemberList(ctx, update.members)
+			if generatedName != "" {
+				name = &generatedName
+			}
+		}
+		if name == nil {
+			continue
+		}
+		portalKey := networkid.PortalKey{ID: makePortalID(update.chatMid), Receiver: lc.UserLogin.ID}
+		lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatInfoChange{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatInfoChange,
+				PortalKey: portalKey,
+				Timestamp: time.Now(),
+			},
+			ChatInfoChange: &bridgev2.ChatInfoChange{
+				ChatInfo: &bridgev2.ChatInfo{
+					Name: name,
+				},
+			},
+		})
+	}
 }
 
 func (lc *LineClient) pollLoop(ctx context.Context) {
@@ -487,6 +695,7 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 				Avatar: avatar,
 			},
 		})
+		lc.refreshGroupsForContact(ctx, mid)
 
 	case OpDeleteSelfFromChat:
 		lc.handleSelfLeave(op.Param1)
@@ -711,23 +920,6 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 	}
 	chat := chatsResp.Chats[0]
 
-	// Check if the bridge user is still a member of this group
-	if chat.Extra.GroupExtra != nil {
-		_, isMember := chat.Extra.GroupExtra.MemberMids[lc.Mid]
-		_, isInvitee := chat.Extra.GroupExtra.InviteeMids[lc.Mid]
-		if !isMember && !isInvitee {
-			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Bridge user no longer in group, emitting leave")
-			lc.handleSelfLeave(chatMid)
-			return
-		}
-		if isInvitee && !isMember {
-			// Bridge user was invited but hasn't joined yet
-			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Bridge user invited to group, emitting invite")
-			lc.handleInvite(ctx, chatMid)
-			return
-		}
-	}
-
 	portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
 
 	var avatar *bridgev2.Avatar
@@ -862,18 +1054,22 @@ func (lc *LineClient) handleInvite(ctx context.Context, chatMid string) {
 	if !isBridgeUserInvitee {
 		// Someone else is being invited — emit MembershipInvite for each invitee
 		if chat.Extra.GroupExtra != nil {
+			membership := event.MembershipInvite
+			if chat.Type == 1 {
+				membership = event.MembershipJoin
+			}
 			for inviteeMid := range chat.Extra.GroupExtra.InviteeMids {
 				if inviteeMid == lc.Mid || inviteeMid == string(lc.UserLogin.ID) {
 					continue
 				}
-				lc.emitMemberChange(chat.ChatMid, inviteeMid, event.MembershipInvite, time.Now())
+				lc.emitMemberChange(chat.ChatMid, inviteeMid, membership, time.Now())
 			}
 		}
 		return
 	}
 
 	portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
-	info := lc.chatToChatInfo(&chat, false)
+	info := lc.chatToChatInfo(ctx, &chat, false)
 	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{
 			Type:      bridgev2.RemoteEventChatResync,

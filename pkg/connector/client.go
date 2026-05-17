@@ -30,12 +30,15 @@ type LineClient struct {
 	reqSeqMu    sync.Mutex
 	sentReqSeqs map[int]time.Time
 
-	// cacheMu protects peerKeys, contactCache, mediaFlowCache, and noE2EEGroups.
-	// Hold it only around map accesses — never across network calls.
-	cacheMu        sync.Mutex
-	noE2EEGroups   map[string]time.Time // chatMid -> when group E2EE failure was cached
-	contactCache   map[string]cachedContact
-	mediaFlowCache map[string]cachedMediaFlow
+	// cacheMu protects peerKeys, contactCache, mediaFlowCache, noE2EEGroups,
+	// groupMemberCache, and generatedGroupNameCache.
+	// Hold it only around map accesses; never across network calls.
+	cacheMu                 sync.Mutex
+	noE2EEGroups            map[string]time.Time // chatMid -> when group E2EE failure was cached
+	contactCache            map[string]cachedContact
+	mediaFlowCache          map[string]cachedMediaFlow
+	groupMemberCache        map[string][]string // chatMid -> list of member MIDs from CreateGroup or getChatMemberMIDs
+	generatedGroupNameCache map[string]bool     // chatMid -> true when Matrix name should be generated from member names
 
 	wg sync.WaitGroup
 }
@@ -170,6 +173,9 @@ func (lc *LineClient) Connect(ctx context.Context) {
 	}
 	if lc.contactCache == nil {
 		lc.contactCache = make(map[string]cachedContact)
+	}
+	if lc.groupMemberCache == nil {
+		lc.groupMemberCache = make(map[string][]string)
 	}
 	lc.cacheMu.Unlock()
 	lc.reqSeqMu.Lock()

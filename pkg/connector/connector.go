@@ -45,6 +45,28 @@ func (lc *LineConnector) GetBridgeInfoVersion() (info, capabilities int) {
 func (lc *LineConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 	return &bridgev2.NetworkGeneralCapabilities{
 		AggressiveUpdateInfo: true,
+		Provisioning: bridgev2.ProvisioningCapabilities{
+			ResolveIdentifier: bridgev2.ResolveIdentifierCapabilities{
+				Search:      true,
+				ContactList: true,
+				CreateDM:    true,
+			},
+			GroupCreation: map[string]bridgev2.GroupTypeCapabilities{
+				"group": {
+					TypeDescription: "LINE Group",
+					Name: bridgev2.GroupFieldCapability{
+						Allowed:   true,
+						MinLength: 1,
+						MaxLength: 50,
+					},
+					Participants: bridgev2.GroupFieldCapability{
+						Allowed:   true,
+						MinLength: 1,
+						MaxLength: 100,
+					},
+				},
+			},
+		},
 	}
 }
 
