@@ -871,12 +871,17 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 		}
 
 	default:
-		lc.UserLogin.Bridge.Log.Debug().
+		logEvt := lc.UserLogin.Bridge.Log.Debug().
 			Int("op_type", op.Type).
 			Str("param1", op.Param1).
 			Str("param2", op.Param2).
-			Str("param3", op.Param3).
-			Msg("Unhandled SSE operation")
+			Str("param3", op.Param3)
+		if op.Message != nil {
+			logEvt = logEvt.Str("msg_from", op.Message.From).
+				Int("msg_content_type", op.Message.ContentType).
+				Interface("msg_metadata", op.Message.ContentMetadata)
+		}
+		logEvt.Msg("Unhandled SSE operation")
 	}
 }
 

@@ -114,6 +114,7 @@ func (lc *LineClient) shouldUseE2EEMediaFlow(chatMid string, contentType int) bo
 }
 
 var _ bridgev2.NetworkAPI = (*LineClient)(nil)
+var _ bridgev2.NetworkAPIWithUserID = (*LineClient)(nil)
 var _ bridgev2.ReadReceiptHandlingNetworkAPI = (*LineClient)(nil)
 var _ bridgev2.ReactionHandlingNetworkAPI = (*LineClient)(nil)
 
@@ -370,6 +371,10 @@ func (lc *LineClient) Disconnect() {
 }
 
 func (lc *LineClient) IsLoggedIn() bool { return lc.AccessToken != "" }
+
+func (lc *LineClient) GetUserID() networkid.UserID {
+	return makeUserID(lc.Mid)
+}
 
 func (lc *LineClient) LogoutRemote(ctx context.Context) {}
 

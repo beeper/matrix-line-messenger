@@ -46,6 +46,7 @@ func (lc *LineConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities 
 	return &bridgev2.NetworkGeneralCapabilities{
 		AggressiveUpdateInfo: true,
 		Provisioning: bridgev2.ProvisioningCapabilities{
+			ImagePackImport: false,
 			ResolveIdentifier: bridgev2.ResolveIdentifierCapabilities{
 				Search:      true,
 				ContactList: true,

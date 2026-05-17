@@ -42,14 +42,20 @@ func (lc *LineClient) queueIncomingMessage(msg *line.Message, opType int) {
 		ContentSticker, ContentContact, ContentFile, ContentLocation:
 		// supported — continue
 	default:
-		lc.UserLogin.Bridge.Log.Debug().
-			Int("content_type", msg.ContentType).
-			Str("msg_id", msg.ID).
-			Interface("content_metadata", msg.ContentMetadata).
-			Str("text", msg.Text).
-			Int("chunk_count", len(msg.Chunks)).
-			Msg("Skipping unsupported content type")
-		return
+		// Let call and contact notifications through regardless of content type,
+		// as LINE may wrap them in non-standard content type values.
+		if msg.ContentMetadata["ORGCONTP"] == "CALL" || msg.ContentMetadata["ORGCONTP"] == "CONTACT" {
+			// pass through — the ConvertMessageFunc will handle routing
+		} else {
+			lc.UserLogin.Bridge.Log.Debug().
+				Int("content_type", msg.ContentType).
+				Str("msg_id", msg.ID).
+				Interface("content_metadata", msg.ContentMetadata).
+				Str("text", msg.Text).
+				Int("chunk_count", len(msg.Chunks)).
+				Msg("Skipping unsupported content type")
+			return
+		}
 	}
 
 	senderID := makeUserID(msg.From)
