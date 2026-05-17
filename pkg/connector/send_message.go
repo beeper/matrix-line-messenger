@@ -38,6 +38,14 @@ func (lc *LineClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Mat
 	lowerPortalID := strings.ToLower(portalMid)
 	isGroup := strings.HasPrefix(lowerPortalID, "c") || strings.HasPrefix(lowerPortalID, "r")
 
+	// Block sends to blocked contacts in DMs.
+	if !isGroup && lc.isUserBlocked(portalMid) {
+		return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("user is blocked on LINE: unblock them on your phone to send messages")).
+			WithIsCertain(true).
+			WithSendNotice(true).
+			WithErrorReason(event.MessageStatusGenericError)
+	}
+
 	// Determine whether we need to send as plain text (peer/group has Letter Sealing off).
 	plainText := false
 	if lc.E2EE == nil {

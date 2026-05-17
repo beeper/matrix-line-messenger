@@ -30,10 +30,11 @@ type LineClient struct {
 	reqSeqMu    sync.Mutex
 	sentReqSeqs map[int]time.Time
 
-	// cacheMu protects peerKeys, contactCache, mediaFlowCache, noE2EEGroups,
-	// groupMemberCache, and generatedGroupNameCache.
+	// cacheMu protects peerKeys, blockedUsers, contactCache, mediaFlowCache,
+	// noE2EEGroups, groupMemberCache, and generatedGroupNameCache.
 	// Hold it only around map accesses; never across network calls.
 	cacheMu                 sync.Mutex
+	blockedUsers            map[string]bool      // mid -> true if the user has blocked this contact in LINE
 	noE2EEGroups            map[string]time.Time // chatMid -> when group E2EE failure was cached
 	contactCache            map[string]cachedContact
 	mediaFlowCache          map[string]cachedMediaFlow
@@ -114,6 +115,12 @@ func (lc *LineClient) shouldUseE2EEMediaFlow(chatMid string, contentType int) bo
 	return true
 }
 
+func (lc *LineClient) isUserBlocked(mid string) bool {
+	lc.cacheMu.Lock()
+	defer lc.cacheMu.Unlock()
+	return lc.blockedUsers[mid]
+}
+
 var _ bridgev2.NetworkAPI = (*LineClient)(nil)
 var _ bridgev2.NetworkAPIWithUserID = (*LineClient)(nil)
 var _ bridgev2.ReadReceiptHandlingNetworkAPI = (*LineClient)(nil)
@@ -173,14 +180,14 @@ func (lc *LineClient) Connect(ctx context.Context) {
 	if lc.peerKeys == nil {
 		lc.peerKeys = make(map[string]peerKeyInfo)
 	}
+	if lc.blockedUsers == nil {
+		lc.blockedUsers = make(map[string]bool)
+	}
 	if lc.contactCache == nil {
 		lc.contactCache = make(map[string]cachedContact)
 	}
 	if lc.groupMemberCache == nil {
 		lc.groupMemberCache = make(map[string][]string)
-	}
-	if lc.reactionIconMXC == nil {
-		lc.reactionIconMXC = make(map[int]string)
 	}
 	lc.cacheMu.Unlock()
 	lc.reqSeqMu.Lock()
@@ -248,6 +255,22 @@ func (lc *LineClient) Connect(ctx context.Context) {
 				}
 			}
 		}
+	}
+
+	// Fetch initial blocked contacts list before starting sync loops.
+	blockedMIDs, err := func() ([]string, error) {
+		client := line.NewClient(lc.AccessToken)
+		return client.GetBlockedContactIds()
+	}()
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Warn().Err(err).Msg("Failed to fetch blocked contacts, continuing without block list")
+	} else {
+		lc.cacheMu.Lock()
+		for _, mid := range blockedMIDs {
+			lc.blockedUsers[mid] = true
+		}
+		lc.cacheMu.Unlock()
+		lc.UserLogin.Bridge.Log.Info().Int("count", len(blockedMIDs)).Msg("Fetched blocked contacts")
 	}
 
 	lc.wg.Add(4)

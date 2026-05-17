@@ -786,6 +786,26 @@ func (c *Client) GetAllContactIds() ([]string, error) {
 	return wrapper.Data, nil
 }
 
+// GetBlockedContactIds returns the MIDs of all contacts blocked by the user.
+func (c *Client) GetBlockedContactIds() ([]string, error) {
+	resp, err := c.callRPC("TalkService", "getBlockedContactIds")
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Code    int      `json:"code"`
+		Message string   `json:"message"`
+		Data    []string `json:"data"`
+	}
+	if err := json.Unmarshal(resp, &wrapper); err != nil {
+		return nil, fmt.Errorf("failed to parse getBlockedContactIds response: %w", err)
+	}
+	if wrapper.Code != 0 {
+		return nil, fmt.Errorf("getBlockedContactIds failed: %s", wrapper.Message)
+	}
+	return wrapper.Data, nil
+}
+
 // DetermineMediaMessageFlow asks the server which upload path to use for media
 // in a given chat. Flow value 2 = E2EE encrypted upload, 1 = plain upload.
 func (c *Client) DetermineMediaMessageFlow(chatMid string) (*MediaMessageFlowResponse, error) {
