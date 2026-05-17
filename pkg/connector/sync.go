@@ -55,17 +55,6 @@ func (lc *LineClient) syncDMChats(ctx context.Context) {
 		}
 
 		contact := lc.getContact(ctx, mid)
-		var avatar *bridgev2.Avatar
-		if contact.PicturePath != "" {
-			picturePath := contact.PicturePath
-			avatar = &bridgev2.Avatar{
-				ID: networkid.AvatarID(picturePath),
-				Get: func(ctx context.Context) ([]byte, error) {
-					return lc.GetAvatar(ctx, networkid.AvatarID(picturePath))
-				},
-			}
-		}
-
 		dmType := database.RoomTypeDM
 		chatName := contact.EffectiveDisplayName()
 		portalKey := networkid.PortalKey{ID: makePortalID(mid), Receiver: lc.UserLogin.ID}
@@ -78,7 +67,7 @@ func (lc *LineClient) syncDMChats(ctx context.Context) {
 			ChatInfo: &bridgev2.ChatInfo{
 				Type:   &dmType,
 				Name:   &chatName,
-				Avatar: avatar,
+				Avatar: lc.avatarFromPicturePath(contact.PicturePath),
 				Members: &bridgev2.ChatMemberList{
 					IsFull:                     true,
 					ExcludeChangesFromTimeline: true,
@@ -215,16 +204,6 @@ func (lc *LineClient) syncChats(ctx context.Context) {
 }
 
 func (lc *LineClient) chatToChatInfo(ctx context.Context, chat *line.Chat, excludeFromTimeline bool) *bridgev2.ChatInfo {
-	var avatar *bridgev2.Avatar
-	if chat.PicturePath != "" {
-		avatar = &bridgev2.Avatar{
-			ID: networkid.AvatarID(chat.PicturePath),
-			Get: func(ctx context.Context) ([]byte, error) {
-				return lc.GetAvatar(ctx, networkid.AvatarID(chat.PicturePath))
-			},
-		}
-	}
-
 	members := []bridgev2.ChatMember{
 		{
 			EventSender: bridgev2.EventSender{
@@ -332,7 +311,7 @@ func (lc *LineClient) chatToChatInfo(ctx context.Context, chat *line.Chat, exclu
 	return &bridgev2.ChatInfo{
 		Type:   &ct,
 		Name:   &name,
-		Avatar: avatar,
+		Avatar: lc.avatarFromPicturePath(chat.PicturePath),
 		Members: &bridgev2.ChatMemberList{
 			IsFull:                     true,
 			Members:                    members,
@@ -699,17 +678,8 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 			ghost.UpdateInfo(ctx, &bridgev2.UserInfo{
 				Identifiers: []string{mid},
 				Name:        &name,
+				Avatar:      lc.avatarFromPicturePath(contact.PicturePath),
 			})
-		}
-		var avatar *bridgev2.Avatar
-		if contact.PicturePath != "" {
-			picturePath := contact.PicturePath
-			avatar = &bridgev2.Avatar{
-				ID: networkid.AvatarID(picturePath),
-				Get: func(ctx context.Context) ([]byte, error) {
-					return lc.GetAvatar(ctx, networkid.AvatarID(picturePath))
-				},
-			}
 		}
 		dmType := database.RoomTypeDM
 		portalKey := networkid.PortalKey{ID: makePortalID(mid), Receiver: lc.UserLogin.ID}
@@ -722,7 +692,7 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 			ChatInfo: &bridgev2.ChatInfo{
 				Type:   &dmType,
 				Name:   &name,
-				Avatar: avatar,
+				Avatar: lc.avatarFromPicturePath(contact.PicturePath),
 			},
 		})
 		lc.refreshGroupsForContact(ctx, mid)
@@ -1062,16 +1032,6 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 
 	portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
 
-	var avatar *bridgev2.Avatar
-	if chat.PicturePath != "" {
-		avatar = &bridgev2.Avatar{
-			ID: networkid.AvatarID(chat.PicturePath),
-			Get: func(ctx context.Context) ([]byte, error) {
-				return lc.GetAvatar(ctx, networkid.AvatarID(chat.PicturePath))
-			},
-		}
-	}
-
 	// Use ChatInfoChange to only update avatar (and other non-name metadata).
 	// Name updates are handled by handleGroupRename from contentType=18 messages,
 	// which has the correct new name from LOC_ARGS.
@@ -1084,7 +1044,7 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 		},
 		ChatInfoChange: &bridgev2.ChatInfoChange{
 			ChatInfo: &bridgev2.ChatInfo{
-				Avatar: avatar,
+				Avatar: lc.avatarFromPicturePath(chat.PicturePath),
 			},
 		},
 	})
