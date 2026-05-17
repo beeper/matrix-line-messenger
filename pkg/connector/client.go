@@ -34,8 +34,8 @@ type LineClient struct {
 	// noE2EEGroups, groupMemberCache, and generatedGroupNameCache.
 	// Hold it only around map accesses; never across network calls.
 	cacheMu                 sync.Mutex
-	blockedUsers            map[string]bool       // mid -> true if the user has blocked this contact in LINE
-	noE2EEGroups            map[string]time.Time   // chatMid -> when group E2EE failure was cached
+	blockedUsers            map[string]bool      // mid -> true if the user has blocked this contact in LINE
+	noE2EEGroups            map[string]time.Time // chatMid -> when group E2EE failure was cached
 	contactCache            map[string]cachedContact
 	mediaFlowCache          map[string]cachedMediaFlow
 	groupMemberCache        map[string][]string // chatMid -> list of member MIDs from CreateGroup or getChatMemberMIDs
