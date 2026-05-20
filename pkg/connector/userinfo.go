@@ -156,7 +156,7 @@ func (lc *LineClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) 
 		if len(res.Chats) == 0 {
 			return nil, fmt.Errorf("chat not found")
 		}
-		return lc.chatToChatInfo(&res.Chats[0], true), nil
+		return lc.chatToChatInfo(ctx, &res.Chats[0], true), nil
 	}
 
 	contact := lc.getContact(ctx, string(portal.ID))
@@ -310,6 +310,128 @@ func (lc *LineClient) ResolveIdentifier(ctx context.Context, identifier string, 
 		Chat:     &bridgev2.CreateChatResponse{Portal: portal, PortalKey: portalID, PortalInfo: portalInfo},
 	}, nil
 }
+
+func (lc *LineClient) midToResolveIdentifier(ctx context.Context, mid string) *bridgev2.ResolveIdentifierResponse {
+	if mid == lc.Mid || mid == string(lc.UserLogin.ID) {
+		return nil
+	}
+	userID := makeUserID(mid)
+	ghost, err := lc.UserLogin.Bridge.GetGhostByID(ctx, userID)
+	if err != nil {
+		return nil
+	}
+	userInfo, _ := lc.GetUserInfo(ctx, ghost)
+	return &bridgev2.ResolveIdentifierResponse{
+		Ghost:    ghost,
+		UserID:   userID,
+		UserInfo: userInfo,
+	}
+}
+
+func (lc *LineClient) SearchUsers(ctx context.Context, query string) ([]*bridgev2.ResolveIdentifierResponse, error) {
+	var results []*bridgev2.ResolveIdentifierResponse
+
+	// Try by LINE user ID first
+	lowerQuery := strings.ToLower(strings.TrimSpace(query))
+	if lowerQuery != "" {
+		client := line.NewClient(lc.AccessToken)
+		contact, err := client.FindContactByUserid(lowerQuery)
+		if err == nil && contact != nil && contact.Mid != "" {
+			if r := lc.midToResolveIdentifier(ctx, contact.Mid); r != nil {
+				results = append(results, r)
+				if len(results) >= 20 {
+					return results, nil
+				}
+			}
+		}
+	}
+
+	// Search contacts by display name
+	client := line.NewClient(lc.AccessToken)
+	allMids, err := client.GetAllContactIds()
+	if err != nil {
+		if lc.isRefreshRequired(err) || lc.isLoggedOut(err) {
+			if errRecover := lc.recoverToken(ctx); errRecover == nil {
+				client = line.NewClient(lc.AccessToken)
+				allMids, err = client.GetAllContactIds()
+			}
+		}
+		if err != nil {
+			lc.UserLogin.Bridge.Log.Warn().Err(err).Msg("Failed to get all contact IDs for search")
+			return results, nil
+		}
+	}
+
+	// Fetch contacts in batches to check display names
+	for i := 0; i < len(allMids); i += 50 {
+		end := i + 50
+		if end > len(allMids) {
+			end = len(allMids)
+		}
+		batch := allMids[i:end]
+		contactsResp, err := client.GetContactsV2(batch)
+		if err != nil {
+			continue
+		}
+		for _, wrapper := range contactsResp.Contacts {
+			c := wrapper.Contact
+			if c.Mid == "" {
+				continue
+			}
+			name := strings.ToLower(c.EffectiveDisplayName())
+			if lowerQuery == "" || strings.Contains(name, lowerQuery) {
+				if r := lc.midToResolveIdentifier(ctx, c.Mid); r != nil {
+					results = append(results, r)
+				}
+			}
+		}
+	}
+
+	return results, nil
+}
+
+var _ bridgev2.UserSearchingNetworkAPI = (*LineClient)(nil)
+
+func (lc *LineClient) GetContactList(ctx context.Context) ([]*bridgev2.ResolveIdentifierResponse, error) {
+	client := line.NewClient(lc.AccessToken)
+	allMids, err := client.GetAllContactIds()
+	if err != nil {
+		if lc.isRefreshRequired(err) || lc.isLoggedOut(err) {
+			if errRecover := lc.recoverToken(ctx); errRecover == nil {
+				client = line.NewClient(lc.AccessToken)
+				allMids, err = client.GetAllContactIds()
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var results []*bridgev2.ResolveIdentifierResponse
+	for i := 0; i < len(allMids); i += 50 {
+		end := i + 50
+		if end > len(allMids) {
+			end = len(allMids)
+		}
+		batch := allMids[i:end]
+		contactsResp, err := client.GetContactsV2(batch)
+		if err != nil {
+			continue
+		}
+		for mid, wrapper := range contactsResp.Contacts {
+			if wrapper.Contact.Mid == "" {
+				continue
+			}
+			if r := lc.midToResolveIdentifier(ctx, mid); r != nil {
+				results = append(results, r)
+			}
+		}
+	}
+
+	return results, nil
+}
+
+var _ bridgev2.ContactListingNetworkAPI = (*LineClient)(nil)
 
 func (lc *LineClient) GetAvatar(ctx context.Context, id networkid.AvatarID) ([]byte, error) {
 	url := fmt.Sprintf("https://profile.line-scdn.net%s", id)

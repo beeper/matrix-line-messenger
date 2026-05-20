@@ -29,6 +29,11 @@ func NewRuntime() (*Runtime, error) {
 	return &Runtime{mod: mod, imp: imp}, nil
 }
 
+// ModuleMem returns the linear memory buffer for direct access.
+func (rt *Runtime) ModuleMem() []byte {
+	return rt.mod.mem
+}
+
 // Close releases resources. No-op for the transpiled module.
 func (rt *Runtime) Close() {}
 
@@ -213,6 +218,17 @@ func (rt *Runtime) Curve25519KeyCreateChannel(keyPtr uint32, peerPub []byte) (ui
 	return ptr, nil
 }
 
+func (rt *Runtime) Curve25519KeyGenerate() (uint32, error) {
+	ptr, err := rt.imp.CallStatic("Curve25519Key", "generate", 1)
+	if err != nil {
+		return 0, fmt.Errorf("ltsm: Curve25519Key.generate failed: %w", err)
+	}
+	if ptr == 0 {
+		return 0, fmt.Errorf("ltsm: Curve25519Key.generate returned nil")
+	}
+	return ptr, nil
+}
+
 // --- E2EEKey ---
 
 func (rt *Runtime) E2EEKeyLoadKey(keyBytes []byte) (uint32, error) {
@@ -285,6 +301,19 @@ func (rt *Runtime) E2EEChannelUnwrapGroupSharedKey(chanPtr uint32, encKey []byte
 		return 0, fmt.Errorf("ltsm: E2EEChannel.unwrapGroupSharedKey returned null")
 	}
 	return ptr, nil
+}
+
+func (rt *Runtime) E2EEChannelWrapGroupSharedKey(chanPtr uint32, keyHandle uint32) ([]byte, error) {
+	handle, err := rt.imp.CallMethod("E2EEChannel", "wrapGroupSharedKey", chanPtr, keyHandle)
+	if err != nil {
+		return nil, fmt.Errorf("ltsm: E2EEChannel.wrapGroupSharedKey failed: %w", err)
+	}
+	data, err := rt.imp.ReadEmvalBytes(handle)
+	if err != nil {
+		return nil, fmt.Errorf("ltsm: failed to read wrapGroupSharedKey result: %w", err)
+	}
+	rt.imp.emval.DecRef(handle)
+	return data, nil
 }
 
 func (rt *Runtime) E2EEChannelGenerateConfirmHash(chanPtr uint32, encKeyChain []byte) ([]byte, error) {

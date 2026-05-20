@@ -20,7 +20,10 @@ const (
 	OpCancelInvitation       OperationType = 126
 	OpDeleteSelfFromChat     OperationType = 127
 	OpDeleteOtherFromChat    OperationType = 132
+	OpPredefinedReaction     OperationType = 139
 	OpReaction               OperationType = 140
+	OpBlockContact           OperationType = 6
+	OpUnblockContact         OperationType = 7
 )
 
 // ContentType values for LINE messages.

@@ -140,6 +140,9 @@ func (lc *LineClient) prefetchMessages(ctx context.Context) {
 		// Reverse messages to process oldest first
 		for i := len(msgs) - 1; i >= 0; i-- {
 			msg := msgs[i]
+			if msg.ContentType == 18 {
+				lc.cacheGroupMembersFromSystemMessage(msg)
+			}
 
 			existing, err := lc.UserLogin.Bridge.DB.Message.GetPartByID(ctx, lc.UserLogin.ID, networkid.MessageID(msg.ID), "")
 			if err == nil && existing != nil {
@@ -198,7 +201,7 @@ func (lc *LineClient) syncChats(ctx context.Context) {
 		for _, chat := range chatsResp.Chats {
 			portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
 
-			info := lc.chatToChatInfo(&chat, true)
+			info := lc.chatToChatInfo(ctx, &chat, true)
 			lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
 				EventMeta: simplevent.EventMeta{
 					Type:      bridgev2.RemoteEventChatResync,
@@ -211,7 +214,7 @@ func (lc *LineClient) syncChats(ctx context.Context) {
 	}
 }
 
-func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) *bridgev2.ChatInfo {
+func (lc *LineClient) chatToChatInfo(ctx context.Context, chat *line.Chat, excludeFromTimeline bool) *bridgev2.ChatInfo {
 	var avatar *bridgev2.Avatar
 	if chat.PicturePath != "" {
 		avatar = &bridgev2.Avatar{
@@ -233,6 +236,7 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 		},
 	}
 
+	var groupMemberMids []string
 	if chat.Extra.GroupExtra != nil {
 		if chat.Extra.GroupExtra.CreatorMid == lc.Mid {
 			members[0].PowerLevel = ptr.Ptr(100)
@@ -245,10 +249,15 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 				members[0].Membership = event.MembershipInvite
 			}
 		}
+
+		// Populate group member cache for fallback use when GetChats
+		// returns empty MemberMids (known LINE API issue).
+		allMemberMids := make([]string, 0, len(chat.Extra.GroupExtra.MemberMids))
 		for m := range chat.Extra.GroupExtra.MemberMids {
 			if m == lc.Mid || m == string(lc.UserLogin.ID) || strings.HasPrefix(m, "c") || strings.HasPrefix(m, "r") {
 				continue
 			}
+			allMemberMids = append(allMemberMids, m)
 			members = append(members, bridgev2.ChatMember{
 				EventSender: bridgev2.EventSender{
 					Sender: makeUserID(m),
@@ -260,18 +269,59 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 			if m == lc.Mid || m == string(lc.UserLogin.ID) || strings.HasPrefix(m, "c") || strings.HasPrefix(m, "r") {
 				continue
 			}
+			allMemberMids = append(allMemberMids, m)
+			membership := event.MembershipInvite
+			if chat.Type == 1 {
+				membership = event.MembershipJoin
+			}
 			members = append(members, bridgev2.ChatMember{
 				EventSender: bridgev2.EventSender{
 					Sender: makeUserID(m),
 				},
-				Membership: event.MembershipInvite,
+				Membership: membership,
 			})
 		}
+		if len(allMemberMids) == 0 {
+			lc.cacheGroupMembersFromRecentMessages(ctx, chat.ChatMid)
+			for _, m := range lc.getCachedGroupMembers(chat.ChatMid) {
+				if m == lc.Mid || m == string(lc.UserLogin.ID) || strings.HasPrefix(m, "c") || strings.HasPrefix(m, "r") {
+					continue
+				}
+				allMemberMids = append(allMemberMids, m)
+				members = append(members, bridgev2.ChatMember{
+					EventSender: bridgev2.EventSender{
+						Sender: makeUserID(m),
+					},
+					Membership: event.MembershipJoin,
+				})
+			}
+		}
+
+		groupMemberMids = make([]string, 0, len(allMemberMids)+1)
+		groupMemberMids = append(groupMemberMids, lc.Mid)
+		groupMemberMids = append(groupMemberMids, allMemberMids...)
+		lc.cacheMu.Lock()
+		if lc.groupMemberCache == nil {
+			lc.groupMemberCache = make(map[string][]string)
+		}
+		if lc.generatedGroupNameCache == nil {
+			lc.generatedGroupNameCache = make(map[string]bool)
+		}
+		lc.groupMemberCache[chat.ChatMid] = groupMemberMids
+		lc.cacheMu.Unlock()
 	}
 
 	name := chat.ChatName
+	if chat.Extra.GroupExtra != nil && chat.Type == 1 {
+		lc.cacheMu.Lock()
+		generateName := lc.generatedGroupNameCache[chat.ChatMid]
+		lc.cacheMu.Unlock()
+		if generateName && len(groupMemberMids) > 1 {
+			name = lc.generateNameFromMemberList(ctx, groupMemberMids)
+		}
+	}
 	if name == "" && chat.Extra.GroupExtra != nil {
-		name = lc.generateNameFromMembers(chat.Extra.GroupExtra.MemberMids)
+		name = lc.generateNameFromMemberList(ctx, groupMemberMids)
 	}
 
 	ct := database.RoomTypeGroupDM
@@ -292,18 +342,22 @@ func (lc *LineClient) chatToChatInfo(chat *line.Chat, excludeFromTimeline bool) 
 	}
 }
 
-func (lc *LineClient) generateNameFromMembers(members map[string]bool) string {
+func (lc *LineClient) generateNameFromMemberList(ctx context.Context, members []string) string {
 	var names []string
 	count := 0
-	for mid := range members {
+	seen := make(map[string]struct{}, len(members))
+	for _, mid := range members {
 		if mid == string(lc.UserLogin.ID) || mid == lc.Mid || strings.HasPrefix(mid, "c") || strings.HasPrefix(mid, "r") {
 			continue
 		}
-		lc.cacheMu.Lock()
-		cached, ok := lc.contactCache[mid]
-		lc.cacheMu.Unlock()
-		if ok && cached.DisplayName != "" {
-			names = append(names, cached.DisplayName)
+		if _, ok := seen[mid]; ok {
+			continue
+		}
+		seen[mid] = struct{}{}
+		contact := lc.getContact(ctx, mid)
+		name := contact.EffectiveDisplayName()
+		if name != "" && name != mid {
+			names = append(names, name)
 		}
 		count++
 		if count >= 20 {
@@ -322,8 +376,13 @@ func (lc *LineClient) generateNameFromMembers(members map[string]bool) string {
 
 	result := strings.Join(finalNames, ", ")
 	actualMemberCount := 0
-	for m := range members {
-		if m != string(lc.UserLogin.ID) && m != lc.Mid && !strings.HasPrefix(m, "c") && !strings.HasPrefix(m, "r") {
+	seen = make(map[string]struct{}, len(members))
+	for _, m := range members {
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		if m != string(lc.UserLogin.ID) && !strings.HasPrefix(m, "c") && !strings.HasPrefix(m, "r") {
 			actualMemberCount++
 		}
 	}
@@ -332,6 +391,155 @@ func (lc *LineClient) generateNameFromMembers(members map[string]bool) string {
 		result += fmt.Sprintf(" and %d others", remaining)
 	}
 	return result
+}
+
+func (lc *LineClient) getCachedGroupMembers(chatMid string) []string {
+	lc.cacheMu.Lock()
+	defer lc.cacheMu.Unlock()
+	members := lc.groupMemberCache[chatMid]
+	if len(members) == 0 {
+		return nil
+	}
+	return append([]string(nil), members...)
+}
+
+func (lc *LineClient) cacheGroupMembersFromSystemMessage(msg *line.Message) {
+	if msg == nil || msg.ContentMetadata == nil {
+		return
+	}
+	chatMid := msg.To
+	if !isChatMID(chatMid) {
+		return
+	}
+	locKey := msg.ContentMetadata["LOC_KEY"]
+	switch locKey {
+	case "C_GI", "C_MI", "A_MI", "A_MC":
+	default:
+		return
+	}
+
+	seen := map[string]struct{}{
+		lc.Mid: {},
+	}
+	for _, mid := range lc.getCachedGroupMembers(chatMid) {
+		seen[mid] = struct{}{}
+	}
+	for _, mid := range midsFromSystemLocArgs(msg.ContentMetadata["LOC_ARGS"]) {
+		seen[mid] = struct{}{}
+	}
+	if len(seen) <= 1 {
+		return
+	}
+
+	members := make([]string, 0, len(seen))
+	for mid := range seen {
+		members = append(members, mid)
+	}
+	lc.cacheMu.Lock()
+	if lc.groupMemberCache == nil {
+		lc.groupMemberCache = make(map[string][]string)
+	}
+	lc.groupMemberCache[chatMid] = members
+	lc.cacheMu.Unlock()
+}
+
+func (lc *LineClient) cacheGroupMembersFromRecentMessages(ctx context.Context, chatMid string) {
+	if len(lc.getCachedGroupMembers(chatMid)) > 1 {
+		return
+	}
+	client := line.NewClient(lc.AccessToken)
+	msgs, err := client.GetRecentMessagesV2(chatMid, 50)
+	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
+		if errRecover := lc.recoverToken(ctx); errRecover == nil {
+			client = line.NewClient(lc.AccessToken)
+			msgs, err = client.GetRecentMessagesV2(chatMid, 50)
+		}
+	}
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Debug().Err(err).Str("chat_mid", chatMid).Msg("Failed to fetch recent messages for group member cache")
+		return
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if msg.ContentType == 18 {
+			lc.cacheGroupMembersFromSystemMessage(msg)
+		}
+	}
+}
+
+func midsFromSystemLocArgs(locArgs string) []string {
+	fields := strings.FieldsFunc(locArgs, func(r rune) bool {
+		return r == '\x1e' || r == '\x1f'
+	})
+	mids := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if isUserMID(field) {
+			mids = append(mids, field)
+		}
+	}
+	return mids
+}
+
+func isUserMID(mid string) bool {
+	return len(mid) > 1 && strings.HasPrefix(mid, "U")
+}
+
+func isChatMID(mid string) bool {
+	if mid == "" {
+		return false
+	}
+	lower := strings.ToLower(mid)
+	return strings.HasPrefix(lower, "c") || strings.HasPrefix(lower, "r")
+}
+
+func (lc *LineClient) refreshGroupsForContact(ctx context.Context, mid string) {
+	type groupUpdate struct {
+		chatMid       string
+		members       []string
+		generatedName bool
+	}
+	var updates []groupUpdate
+
+	lc.cacheMu.Lock()
+	for chatMid, members := range lc.groupMemberCache {
+		for _, member := range members {
+			if member == mid {
+				updates = append(updates, groupUpdate{
+					chatMid:       chatMid,
+					members:       append([]string(nil), members...),
+					generatedName: lc.generatedGroupNameCache[chatMid],
+				})
+				break
+			}
+		}
+	}
+	lc.cacheMu.Unlock()
+
+	for _, update := range updates {
+		var name *string
+		if update.generatedName {
+			generatedName := lc.generateNameFromMemberList(ctx, update.members)
+			if generatedName != "" {
+				name = &generatedName
+			}
+		}
+		if name == nil {
+			continue
+		}
+		portalKey := networkid.PortalKey{ID: makePortalID(update.chatMid), Receiver: lc.UserLogin.ID}
+		lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatInfoChange{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatInfoChange,
+				PortalKey: portalKey,
+				Timestamp: time.Now(),
+			},
+			ChatInfoChange: &bridgev2.ChatInfoChange{
+				ChatInfo: &bridgev2.ChatInfo{
+					Name: name,
+				},
+			},
+		})
+	}
 }
 
 func (lc *LineClient) pollLoop(ctx context.Context) {
@@ -448,6 +656,36 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 	}
 
 	switch opType {
+	case OpBlockContact:
+		mid := op.Param1
+		lc.cacheMu.Lock()
+		lc.blockedUsers[mid] = true
+		lc.cacheMu.Unlock()
+		lc.UserLogin.Bridge.Log.Info().Str("mid", mid).Msg("Contact blocked")
+		portalKey := networkid.PortalKey{ID: makePortalID(mid), Receiver: lc.UserLogin.ID}
+		lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatResync,
+				PortalKey: portalKey,
+				Timestamp: time.Now(),
+			},
+		})
+
+	case OpUnblockContact:
+		mid := op.Param1
+		lc.cacheMu.Lock()
+		delete(lc.blockedUsers, mid)
+		lc.cacheMu.Unlock()
+		lc.UserLogin.Bridge.Log.Info().Str("mid", mid).Msg("Contact unblocked")
+		portalKey := networkid.PortalKey{ID: makePortalID(mid), Receiver: lc.UserLogin.ID}
+		lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{
+				Type:      bridgev2.RemoteEventChatResync,
+				PortalKey: portalKey,
+				Timestamp: time.Now(),
+			},
+		})
+
 	case OpContactUpdate:
 		mid := op.Param1
 		lc.cacheMu.Lock()
@@ -487,6 +725,7 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 				Avatar: avatar,
 			},
 		})
+		lc.refreshGroupsForContact(ctx, mid)
 
 	case OpDeleteSelfFromChat:
 		lc.handleSelfLeave(op.Param1)
@@ -523,7 +762,7 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 		lc.wg.Add(1)
 		go func() {
 			defer lc.wg.Done()
-			lc.handleInvite(context.Background(), op.Param1)
+			lc.handleInvite(context.Background(), op.Param1, OperationType(op.Type))
 		}()
 
 	case OpChatUpdate, OpChatUpdate2:
@@ -567,6 +806,33 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 			TargetMessage: networkid.MessageID(msgID),
 		})
 
+	case OpPredefinedReaction:
+		lc.wg.Add(1)
+		go func() {
+			defer lc.wg.Done()
+
+			param2, err := line.ParseReactionParam2(op.Param2)
+			if err != nil {
+				lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to parse predefined reaction param2")
+				return
+			}
+			if param2.Curr == nil {
+				lc.UserLogin.Bridge.Log.Error().Msg("No current reaction in param2")
+				return
+			}
+
+			// Type 139 is the "self" event - sender is always the bridge user
+			op.Param3 = string(lc.UserLogin.ID)
+
+			if param2.Curr.PredefinedReactionType != nil {
+				lc.handlePredefinedReaction(ctx, op, param2.ChatMid, param2.Curr.PredefinedReactionType.Val)
+			} else if param2.Curr.PaidReactionType != nil {
+				lc.handlePaidReaction(ctx, op, param2)
+			} else {
+				lc.UserLogin.Bridge.Log.Error().Msg("No predefined or paid reaction type found in current")
+			}
+		}()
+
 	case OpReaction:
 		lc.wg.Add(1)
 		go func() {
@@ -577,79 +843,28 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 				lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to parse reaction param2")
 				return
 			}
-			if param2.Curr == nil || param2.Curr.PaidReactionType == nil {
-				lc.UserLogin.Bridge.Log.Error().Msg("No current reaction or paid reaction type found")
+			if param2.Curr == nil {
+				lc.UserLogin.Bridge.Log.Error().Msg("No current reaction type found")
 				return
 			}
 
-			prt := param2.Curr.PaidReactionType
-			url := fmt.Sprintf("https://stickershop.line-scdn.net/sticonshop/v1/sticon/%s/android/%s.png", prt.ProductID, prt.EmojiID)
+			// Handle predefined reactions sent via type 140 operations
+			if param2.Curr.PaidReactionType == nil && param2.Curr.PredefinedReactionType != nil {
+				// Type 140 is the "other" event - param3 is the observer,
+				// not the actor. Override with chatMid, which in 1:1 DMs
+				// is the other participant's MID (the reacting user).
+				op.Param3 = param2.ChatMid
 
-			resp, err := lc.HTTPClient.Get(url)
-			if err != nil {
-				lc.UserLogin.Bridge.Log.Error().Err(err).Str("url", url).Msg("Failed to download reaction image")
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != 200 {
-				lc.UserLogin.Bridge.Log.Error().Int("status_code", resp.StatusCode).Str("url", url).Msg("Failed to download reaction image: bad status code")
+				lc.handlePredefinedReaction(ctx, op, param2.ChatMid, param2.Curr.PredefinedReactionType.Val)
 				return
 			}
 
-			data, err := io.ReadAll(resp.Body)
-			if err != nil {
-				lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to read reaction image body")
+			if param2.Curr.PaidReactionType == nil {
+				lc.UserLogin.Bridge.Log.Error().Msg("No paid reaction type found")
 				return
 			}
 
-			mimeType := resp.Header.Get("Content-Type")
-			if mimeType == "" {
-				mimeType = "image/png"
-			}
-
-			senderID := makeUserID(op.Param3)
-			ghost, err := lc.UserLogin.Bridge.GetGhostByID(ctx, senderID)
-			if err != nil {
-				lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to get ghost for reaction sender")
-				return
-			}
-
-			portalKey := networkid.PortalKey{ID: makePortalID(param2.ChatMid), Receiver: lc.UserLogin.ID}
-			portal, err := lc.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
-			if err != nil || portal == nil {
-				lc.UserLogin.Bridge.Log.Error().Err(err).Str("chat_mid", param2.ChatMid).Msg("Failed to get portal for reaction")
-				return
-			}
-
-			if portal.MXID == "" {
-				lc.UserLogin.Bridge.Log.Error().Msg("Portal MXID is empty, cannot upload media")
-				return
-			}
-
-			mxc, uploadedFile, err := ghost.Intent.UploadMedia(ctx, "", data, "reaction.png", mimeType)
-			if err != nil {
-				lc.UserLogin.Bridge.Log.Error().Err(err).Int("data_len", len(data)).Msg("Failed to upload reaction image to Matrix")
-				return
-			}
-			if mxc == "" && uploadedFile != nil && uploadedFile.URL != "" {
-				mxc = id.ContentURIString(uploadedFile.URL)
-			}
-			if mxc == "" {
-				lc.UserLogin.Bridge.Log.Error().Interface("uploaded_file", uploadedFile).Msg("UploadMedia returned empty MXC URI")
-				return
-			}
-
-			ts, _ := op.CreatedTime.Int64()
-			lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.Reaction{
-				EventMeta: simplevent.EventMeta{
-					Type:      bridgev2.RemoteEventReaction,
-					PortalKey: portalKey,
-					Timestamp: time.UnixMilli(ts),
-					Sender:    bridgev2.EventSender{Sender: senderID},
-				},
-				TargetMessage: networkid.MessageID(op.Param1),
-				Emoji:         string(mxc),
-			})
+			lc.handlePaidReaction(ctx, op, param2)
 		}()
 
 	case OpSendMessage, OpReceiveMessage:
@@ -662,13 +877,147 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 		}
 
 	default:
-		lc.UserLogin.Bridge.Log.Debug().
+		logEvt := lc.UserLogin.Bridge.Log.Debug().
 			Int("op_type", op.Type).
 			Str("param1", op.Param1).
 			Str("param2", op.Param2).
-			Str("param3", op.Param3).
-			Msg("Unhandled SSE operation")
+			Str("param3", op.Param3)
+		if op.Message != nil {
+			logEvt = logEvt.Str("msg_from", op.Message.From).
+				Int("msg_content_type", op.Message.ContentType).
+				Interface("msg_metadata", op.Message.ContentMetadata)
+		}
+		logEvt.Msg("Unhandled SSE operation")
 	}
+}
+
+func (lc *LineClient) handlePaidReaction(ctx context.Context, op line.Operation, param2 *line.ReactionPayload) {
+	prt := param2.Curr.PaidReactionType
+	url := fmt.Sprintf("https://stickershop.line-scdn.net/sticonshop/v1/sticon/%s/android/%s.png", prt.ProductID, prt.EmojiID)
+
+	resp, err := lc.HTTPClient.Get(url)
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Error().Err(err).Str("url", url).Msg("Failed to download reaction image")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		lc.UserLogin.Bridge.Log.Error().Int("status_code", resp.StatusCode).Str("url", url).Msg("Failed to download reaction image: bad status code")
+		return
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to read reaction image body")
+		return
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+
+	senderID := makeUserID(op.Param3)
+	ghost, err := lc.UserLogin.Bridge.GetGhostByID(ctx, senderID)
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Error().Err(err).Msg("Failed to get ghost for reaction sender")
+		return
+	}
+
+	portalKey := networkid.PortalKey{ID: makePortalID(param2.ChatMid), Receiver: lc.UserLogin.ID}
+	portal, err := lc.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
+	if err != nil || portal == nil {
+		lc.UserLogin.Bridge.Log.Error().Err(err).Str("chat_mid", param2.ChatMid).Msg("Failed to get portal for reaction")
+		return
+	}
+
+	if portal.MXID == "" {
+		lc.UserLogin.Bridge.Log.Error().Msg("Portal MXID is empty, cannot upload media")
+		return
+	}
+
+	mxc, uploadedFile, err := ghost.Intent.UploadMedia(ctx, "", data, "reaction.png", mimeType)
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Error().Err(err).Int("data_len", len(data)).Msg("Failed to upload reaction image to Matrix")
+		return
+	}
+	if mxc == "" && uploadedFile != nil && uploadedFile.URL != "" {
+		mxc = id.ContentURIString(uploadedFile.URL)
+	}
+	if mxc == "" {
+		lc.UserLogin.Bridge.Log.Error().Interface("uploaded_file", uploadedFile).Msg("UploadMedia returned empty MXC URI")
+		return
+	}
+
+	ts, _ := op.CreatedTime.Int64()
+	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.Reaction{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventReaction,
+			PortalKey: portalKey,
+			Timestamp: time.UnixMilli(ts),
+			Sender:    bridgev2.EventSender{Sender: senderID},
+		},
+		TargetMessage: networkid.MessageID(op.Param1),
+		Emoji:         string(mxc),
+	})
+}
+
+func (lc *LineClient) handlePredefinedReaction(ctx context.Context, op line.Operation, chatMid string, prt int) {
+	if prt < 2 || prt > 7 {
+		lc.UserLogin.Bridge.Log.Error().Int("predefined_reaction_type", prt).Msg("Unknown predefined reaction type")
+		return
+	}
+
+	senderID := makeUserID(op.Param3)
+	if op.Param3 == "" {
+		senderID = makeUserID(chatMid)
+	}
+
+	portalKey := networkid.PortalKey{ID: makePortalID(chatMid), Receiver: lc.UserLogin.ID}
+
+	lc.cacheMu.Lock()
+	mxc, ok := lc.reactionIconMXC[prt]
+	lc.cacheMu.Unlock()
+
+	if !ok || mxc == "" {
+		pngData, err := getReactionIconData(prt)
+		if err != nil {
+			lc.UserLogin.Bridge.Log.Error().Err(err).Int("prt", prt).Msg("Failed to get reaction icon data")
+			return
+		}
+
+		uploadedMXC, _, err := lc.UserLogin.Bridge.Bot.UploadMedia(ctx, "", pngData, "reaction.png", "image/png")
+		if err != nil {
+			lc.UserLogin.Bridge.Log.Error().Err(err).Int("prt", prt).Msg("Failed to upload reaction icon to Matrix")
+			return
+		}
+		mxc = string(uploadedMXC)
+
+		lc.cacheMu.Lock()
+		if lc.reactionIconMXC == nil {
+			lc.reactionIconMXC = make(map[int]string)
+		}
+		lc.reactionIconMXC[prt] = mxc
+		lc.cacheMu.Unlock()
+	}
+
+	dedupKey := op.Param1 + "\x00" + mxc
+	if _, loaded := lc.recentReactions.LoadOrStore(dedupKey, struct{}{}); loaded {
+		lc.UserLogin.Bridge.Log.Debug().Str("msg_id", op.Param1).Msg("Skipping duplicate predefined reaction")
+		return
+	}
+
+	ts, _ := op.CreatedTime.Int64()
+	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.Reaction{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventReaction,
+			PortalKey: portalKey,
+			Timestamp: time.UnixMilli(ts),
+			Sender:    bridgev2.EventSender{Sender: senderID},
+		},
+		TargetMessage: networkid.MessageID(op.Param1),
+		Emoji:         mxc,
+	})
 }
 
 func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
@@ -692,7 +1041,7 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 				lc.handleSelfLeave(chatMid)
 			} else if isInvitee {
 				lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("User is an invitee, handling invite")
-				lc.handleInvite(ctx, chatMid)
+				lc.handleInviteForSelf(ctx, chatMid)
 			}
 		}
 		return
@@ -705,28 +1054,11 @@ func (lc *LineClient) syncSingleChat(ctx context.Context, op line.Operation) {
 			lc.handleSelfLeave(chatMid)
 		} else if isInvitee {
 			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("User is an invitee (empty resp), handling invite")
-			lc.handleInvite(ctx, chatMid)
+			lc.handleInviteForSelf(ctx, chatMid)
 		}
 		return
 	}
 	chat := chatsResp.Chats[0]
-
-	// Check if the bridge user is still a member of this group
-	if chat.Extra.GroupExtra != nil {
-		_, isMember := chat.Extra.GroupExtra.MemberMids[lc.Mid]
-		_, isInvitee := chat.Extra.GroupExtra.InviteeMids[lc.Mid]
-		if !isMember && !isInvitee {
-			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Bridge user no longer in group, emitting leave")
-			lc.handleSelfLeave(chatMid)
-			return
-		}
-		if isInvitee && !isMember {
-			// Bridge user was invited but hasn't joined yet
-			lc.UserLogin.Bridge.Log.Info().Str("chat_mid", chatMid).Msg("Bridge user invited to group, emitting invite")
-			lc.handleInvite(ctx, chatMid)
-			return
-		}
-	}
 
 	portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
 
@@ -835,7 +1167,48 @@ func (lc *LineClient) handleMemberJoin(chatMid, joinerMid string) {
 	lc.emitMemberChange(chatMid, joinerMid, event.MembershipJoin, time.Now())
 }
 
-func (lc *LineClient) handleInvite(ctx context.Context, chatMid string) {
+func (lc *LineClient) handleInvite(ctx context.Context, chatMid string, opType OperationType) {
+	// OpInviteIntoChat is only sent to the invitee, so the bridge user is guaranteed to be invited.
+	// For OpNotifiedInviteIntoChat, fetch the chat info and check InviteeMids.
+	if opType == OpInviteIntoChat {
+		// Bridge user is the invitee for group type 0 chats; we need GetChats for chat metadata.
+		lc.handleInviteForSelf(ctx, chatMid)
+		return
+	}
+
+	// OpNotifiedInviteIntoChat — someone else was invited into a chat we're in.
+	client := line.NewClient(lc.AccessToken)
+	chatsResp, err := client.GetChats([]string{chatMid}, true, true)
+	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
+		if errRecover := lc.recoverToken(ctx); errRecover == nil {
+			client = line.NewClient(lc.AccessToken)
+			chatsResp, err = client.GetChats([]string{chatMid}, true, true)
+		}
+	}
+	if err != nil {
+		lc.UserLogin.Bridge.Log.Warn().Err(err).Str("chat_mid", chatMid).Msg("Failed to fetch chat info for notified invite")
+		return
+	}
+	if len(chatsResp.Chats) == 0 {
+		return
+	}
+	chat := chatsResp.Chats[0]
+
+	if chat.Extra.GroupExtra != nil {
+		membership := event.MembershipInvite
+		if chat.Type == 1 {
+			membership = event.MembershipJoin
+		}
+		for inviteeMid := range chat.Extra.GroupExtra.InviteeMids {
+			if inviteeMid == lc.Mid || inviteeMid == string(lc.UserLogin.ID) {
+				continue
+			}
+			lc.emitMemberChange(chat.ChatMid, inviteeMid, membership, time.Now())
+		}
+	}
+}
+
+func (lc *LineClient) handleInviteForSelf(ctx context.Context, chatMid string) {
 	client := line.NewClient(lc.AccessToken)
 	chatsResp, err := client.GetChats([]string{chatMid}, true, true)
 	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
@@ -853,27 +1226,21 @@ func (lc *LineClient) handleInvite(ctx context.Context, chatMid string) {
 	}
 	chat := chatsResp.Chats[0]
 
-	// Check if the bridge user is being invited vs. someone else
-	isBridgeUserInvitee := false
+	// OpInviteIntoChat is only sent to the invitee, so the bridge user is always the invitee.
+	// Even if GetChats didn't return the bridge user in InviteeMids (which happens when
+	// the LINE API doesn't include the caller in the invitee list), we add them here so that
+	// chatToChatInfo correctly sets MembershipInvite for GROUP (type 0) chats.
 	if chat.Extra.GroupExtra != nil {
-		_, isBridgeUserInvitee = chat.Extra.GroupExtra.InviteeMids[lc.Mid]
-	}
-
-	if !isBridgeUserInvitee {
-		// Someone else is being invited — emit MembershipInvite for each invitee
-		if chat.Extra.GroupExtra != nil {
-			for inviteeMid := range chat.Extra.GroupExtra.InviteeMids {
-				if inviteeMid == lc.Mid || inviteeMid == string(lc.UserLogin.ID) {
-					continue
-				}
-				lc.emitMemberChange(chat.ChatMid, inviteeMid, event.MembershipInvite, time.Now())
-			}
+		if chat.Extra.GroupExtra.InviteeMids == nil {
+			chat.Extra.GroupExtra.InviteeMids = make(line.FlexibleMidMap)
 		}
-		return
+		chat.Extra.GroupExtra.InviteeMids[lc.Mid] = true
+		// Remove from MemberMids just in case, so MembershipInvite takes precedence
+		delete(chat.Extra.GroupExtra.MemberMids, lc.Mid)
 	}
 
 	portalKey := networkid.PortalKey{ID: makePortalID(chat.ChatMid), Receiver: lc.UserLogin.ID}
-	info := lc.chatToChatInfo(&chat, false)
+	info := lc.chatToChatInfo(ctx, &chat, false)
 	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{
 			Type:      bridgev2.RemoteEventChatResync,

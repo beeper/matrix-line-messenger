@@ -469,6 +469,42 @@ func (m *Manager) UnwrapGroupSharedKey(chatMid string, sharedKey *line.E2EEGroup
 	return unwrappedKeyID, nil
 }
 
+// GenerateGroupKey generates a new Curve25519 key in the WASM module for use as a group key.
+// Returns the key ID for use with WrapGroupKeyForMember.
+func (m *Manager) GenerateGroupKey() (int, error) {
+	return m.runner.KeyGenerate()
+}
+
+// WrapGroupKeyForMember wraps a WASM-generated group key for a specific group member.
+// keyID must reference an E2EEKey obtained from GenerateGroupKey.
+// Returns the base64-encoded wrapped key, ready for registerE2EEGroupKey.
+func (m *Manager) WrapGroupKeyForMember(memberPubKeyB64 string, keyID int) (string, error) {
+	m.mu.Lock()
+	myKeyID := m.myKeyID
+	m.mu.Unlock()
+
+	if myKeyID == 0 {
+		return "", fmt.Errorf("my E2EE key not loaded")
+	}
+
+	normalized, err := gen.NormalizePeerPublicKeyB64(memberPubKeyB64)
+	if err != nil {
+		return "", fmt.Errorf("invalid member public key: %w", err)
+	}
+
+	chanID, err := m.runner.ChannelCreate(myKeyID, normalized)
+	if err != nil {
+		return "", fmt.Errorf("failed to create ECDH channel: %w", err)
+	}
+
+	encryptedKey, err := m.runner.ChannelWrapGroupSharedKey(chanID, keyID)
+	if err != nil {
+		return "", fmt.Errorf("failed to wrap group key: %w", err)
+	}
+
+	return encryptedKey, nil
+}
+
 func (m *Manager) DecryptGroupMessage(msg *line.Message, chatMid string) (string, int, error) {
 	// Group chunks: [..., groupKeyID(4), ???]
 	// JS: vF365(t, n, r); n=myKeyID, r=groupKeyID.
@@ -577,7 +613,7 @@ func (m *Manager) EncryptGroupMessageRaw(chatMid, fromMid string, contentType in
 	m.mu.Unlock()
 
 	if !ok || unwrappedKeyID == 0 {
-		return nil, fmt.Errorf("no group key found for %s", chatMid)
+		return nil, fmt.Errorf("e2ee key not loaded for group %s", chatMid)
 	}
 
 	chanID, err := m.ensureGroupChannel(chatMid, groupKeyID, unwrappedKeyID, myKeyID)
