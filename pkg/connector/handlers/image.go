@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"strings"
 
 	"maunium.net/go/mautrix/bridgev2"
@@ -35,6 +37,17 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 		}
 		if json.Unmarshal([]byte(mediaInfo), &info) == nil && info.Animated {
 			metadataAnimated = true
+		}
+	}
+	var metadataWidth, metadataHeight int
+	if thumbInfo := data.ContentMetadata["MEDIA_THUMB_INFO"]; thumbInfo != "" {
+		var info struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		}
+		if json.Unmarshal([]byte(thumbInfo), &info) == nil {
+			metadataWidth = info.Width
+			metadataHeight = info.Height
 		}
 	}
 
@@ -151,11 +164,20 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 	msgType := event.MsgImage
 	var info *event.FileInfo
 	if isAnimated {
-		msgType = event.MsgVideo
 		info = &event.FileInfo{
-			MimeType: mimeType,
-			Size:     len(imgData),
-			MauGIF:   true,
+			MimeType:   mimeType,
+			Size:       len(imgData),
+			MauGIF:     true,
+			IsAnimated: true,
+		}
+		if metadataWidth > 0 && metadataHeight > 0 {
+			info.Width = metadataWidth
+			info.Height = metadataHeight
+		} else if config, _, err := image.DecodeConfig(bytes.NewReader(imgData)); err != nil {
+			h.Log.Warn().Err(err).Msg("Failed to decode animated image dimensions")
+		} else {
+			info.Width = config.Width
+			info.Height = config.Height
 		}
 	}
 
