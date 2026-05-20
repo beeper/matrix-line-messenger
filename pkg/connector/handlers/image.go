@@ -31,15 +31,19 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 
 	// MEDIA_CONTENT_INFO marks animated GIFs, which need the original OBS object.
 	metadataAnimated := false
+	var metadataWidth, metadataHeight int
 	if mediaInfo := data.ContentMetadata["MEDIA_CONTENT_INFO"]; mediaInfo != "" {
 		var info struct {
 			Animated bool `json:"animated"`
+			Width    int  `json:"width"`
+			Height   int  `json:"height"`
 		}
-		if json.Unmarshal([]byte(mediaInfo), &info) == nil && info.Animated {
-			metadataAnimated = true
+		if json.Unmarshal([]byte(mediaInfo), &info) == nil {
+			metadataAnimated = info.Animated
+			metadataWidth = info.Width
+			metadataHeight = info.Height
 		}
 	}
-	var metadataWidth, metadataHeight int
 	if thumbInfo := data.ContentMetadata["MEDIA_THUMB_INFO"]; thumbInfo != "" {
 		var info struct {
 			Width  int `json:"width"`
@@ -162,23 +166,22 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 	}
 
 	msgType := event.MsgImage
-	var info *event.FileInfo
+	info := &event.FileInfo{
+		MimeType: mimeType,
+		Size:     len(imgData),
+	}
+	if metadataWidth > 0 && metadataHeight > 0 {
+		info.Width = metadataWidth
+		info.Height = metadataHeight
+	} else if config, _, err := image.DecodeConfig(bytes.NewReader(imgData)); err != nil {
+		h.Log.Warn().Err(err).Bool("animated", isAnimated).Msg("Failed to decode image dimensions")
+	} else {
+		info.Width = config.Width
+		info.Height = config.Height
+	}
 	if isAnimated {
-		info = &event.FileInfo{
-			MimeType:   mimeType,
-			Size:       len(imgData),
-			MauGIF:     true,
-			IsAnimated: true,
-		}
-		if metadataWidth > 0 && metadataHeight > 0 {
-			info.Width = metadataWidth
-			info.Height = metadataHeight
-		} else if config, _, err := image.DecodeConfig(bytes.NewReader(imgData)); err != nil {
-			h.Log.Warn().Err(err).Msg("Failed to decode animated image dimensions")
-		} else {
-			info.Width = config.Width
-			info.Height = config.Height
-		}
+		info.MauGIF = true
+		info.IsAnimated = true
 	}
 
 	return &bridgev2.ConvertedMessage{
