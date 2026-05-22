@@ -18,6 +18,18 @@ var (
 
 const obsTokenBuffer = 30 * time.Second
 
+// InvalidateOBSTokenCache clears the cached OBS access token. The OBS token is
+// derived from the main LINE access token; when the latter is rotated (refresh
+// or re-login) any previously-issued OBS token is invalidated server-side, but
+// the cache here would keep handing it out until its original TTL expires.
+// Callers must invoke this after any successful re-authentication.
+func InvalidateOBSTokenCache() {
+	obsTokenMu.Lock()
+	obsTokenCache = ""
+	obsTokenExpiry = time.Time{}
+	obsTokenMu.Unlock()
+}
+
 // LoginV2 performs the loginV2 RPC call to authenticate a user
 func (c *Client) LoginV2(email, password, certificate, secret string) ([]byte, error) {
 	return c.LoginV2WithType(2, email, password, certificate, secret)
