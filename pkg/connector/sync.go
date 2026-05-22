@@ -1203,9 +1203,10 @@ func (lc *LineClient) handleInviteForSelf(ctx context.Context, chatMid string) {
 	info := lc.chatToChatInfo(ctx, &chat, false)
 	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{
-			Type:      bridgev2.RemoteEventChatResync,
-			PortalKey: portalKey,
-			Timestamp: time.Now(),
+			Type:         bridgev2.RemoteEventChatResync,
+			PortalKey:    portalKey,
+			CreatePortal: true,
+			Timestamp:    time.Now(),
 		},
 		ChatInfo: info,
 	})
