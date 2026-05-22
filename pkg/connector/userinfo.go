@@ -152,21 +152,12 @@ func (lc *LineClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) 
 	}
 
 	contact := lc.getContact(ctx, string(portal.ID))
-	var avatar *bridgev2.Avatar
-	if contact.PicturePath != "" {
-		avatar = &bridgev2.Avatar{
-			ID: networkid.AvatarID(contact.PicturePath),
-			Get: func(ctx context.Context) ([]byte, error) {
-				return lc.GetAvatar(ctx, networkid.AvatarID(contact.PicturePath))
-			},
-		}
-	}
 	dmType := database.RoomTypeDM
 	chatName := contact.EffectiveDisplayName()
 	return &bridgev2.ChatInfo{
 		Type:   &dmType,
 		Name:   &chatName,
-		Avatar: avatar,
+		Avatar: lc.avatarFromPicturePath(contact.PicturePath),
 		Members: &bridgev2.ChatMemberList{
 			IsFull: true,
 			Members: []bridgev2.ChatMember{
@@ -192,20 +183,11 @@ func (lc *LineClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) 
 
 func (lc *LineClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	contact := lc.getContact(ctx, string(ghost.ID))
-	var avatar *bridgev2.Avatar
-	if contact.PicturePath != "" {
-		avatar = &bridgev2.Avatar{
-			ID: networkid.AvatarID(contact.PicturePath),
-			Get: func(ctx context.Context) ([]byte, error) {
-				return lc.GetAvatar(ctx, networkid.AvatarID(contact.PicturePath))
-			},
-		}
-	}
 	name := contact.EffectiveDisplayName()
 	return &bridgev2.UserInfo{
 		Identifiers: []string{string(ghost.ID)},
 		Name:        &name,
-		Avatar:      avatar,
+		Avatar:      lc.avatarFromPicturePath(contact.PicturePath),
 	}, nil
 }
 

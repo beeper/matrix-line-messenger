@@ -68,6 +68,18 @@ type cachedContact struct {
 
 const defaultMediaFlowTTL = 6 * time.Hour
 
+func (lc *LineClient) avatarFromPicturePath(picturePath string) *bridgev2.Avatar {
+	if picturePath == "" {
+		return &bridgev2.Avatar{Remove: true}
+	}
+	return &bridgev2.Avatar{
+		ID: networkid.AvatarID(picturePath),
+		Get: func(ctx context.Context) ([]byte, error) {
+			return lc.GetAvatar(ctx, networkid.AvatarID(picturePath))
+		},
+	}
+}
+
 // shouldUseE2EEMediaFlow checks whether the server wants E2EE upload (flow 2)
 // for the given chat and content type. Returns true for E2EE, false for plain.
 // Falls back to true (E2EE) if the server call fails, to preserve existing behavior.
