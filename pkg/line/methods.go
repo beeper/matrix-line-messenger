@@ -21,7 +21,7 @@ type obsTokenCacheEntry struct {
 	token  string
 	expiry time.Time
 }
-  
+
 // InvalidateOBSTokenCache clears the cached OBS access token. The OBS token is
 // derived from the main LINE access token; when the latter is rotated (refresh
 // or re-login) any previously-issued OBS token is invalidated server-side, but
