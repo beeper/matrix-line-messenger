@@ -29,8 +29,7 @@ type obsTokenCacheEntry struct {
 // Callers must invoke this after any successful re-authentication.
 func InvalidateOBSTokenCache() {
 	obsTokenMu.Lock()
-	obsTokenCache = ""
-	obsTokenExpiry = time.Time{}
+	obsTokenCache = make(map[string]obsTokenCacheEntry)
 	obsTokenMu.Unlock()
 }
 
