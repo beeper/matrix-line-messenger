@@ -7,28 +7,31 @@ import (
 )
 
 type SecretResult struct {
-	Secret       string `json:"secret"`
-	Pin          string `json:"pin"`
-	PublicKeyHex string `json:"publicKeyHex"`
+	Secret          string `json:"secret"`
+	Pin             string `json:"pin"`
+	PublicKeyHex    string `json:"publicKeyHex"`
+	PublicKeyBase64 string `json:"publicKeyBase64"`
+	LoginKeyID      int    `json:"loginKeyId"`
 }
 
-// GenerateSecret performs the E2EE handshake logic using the WASM module via Node.js.
+// GenerateSecret creates the LINE login E2EE secret and returns the matching
+// local login key ID for the follow-up keychain unwrap.
 func GenerateSecret() (*SecretResult, error) {
 	runner, err := gen.GetRunner()
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to get runner: %w", err)
 	}
-	res, err := runner.GenerateE2EESecret()
 
+	res, err := runner.GenerateE2EESecret()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate secret: %w", err)
 	}
 
 	return &SecretResult{
-		Secret:       res.Secret,
-		Pin:          res.Pin,
-		PublicKeyHex: res.PublicKeyHex,
+		Secret:          res.Secret,
+		Pin:             res.Pin,
+		PublicKeyHex:    res.PublicKeyHex,
+		PublicKeyBase64: res.PublicKeyBase64,
+		LoginKeyID:      res.LoginKeyID,
 	}, nil
-
 }

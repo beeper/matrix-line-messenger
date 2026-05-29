@@ -185,7 +185,11 @@ func (m *Manager) SaveSecureDataToFile(id string, data map[string]any) error {
 }
 
 func (m *Manager) InitFromLoginKeyChain(serverPubB64, encryptedKeyChainB64 string) (map[string]string, error) {
-	keys, err := m.runner.LoginUnwrapKeyChain(serverPubB64, encryptedKeyChainB64)
+	return m.InitFromLoginKeyChainWithKey(0, serverPubB64, encryptedKeyChainB64)
+}
+
+func (m *Manager) InitFromLoginKeyChainWithKey(loginKeyID int, serverPubB64, encryptedKeyChainB64 string) (map[string]string, error) {
+	keys, err := m.runner.LoginUnwrapKeyChainWithKey(loginKeyID, serverPubB64, encryptedKeyChainB64)
 	if err != nil {
 		return nil, err
 	}

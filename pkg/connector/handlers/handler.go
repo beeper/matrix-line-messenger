@@ -33,6 +33,11 @@ func (h *Handler) tryRecoverClient(ctx context.Context, err error) (*line.Client
 	if err == nil {
 		return nil, false
 	}
+	isOBSAuthFailure := strings.Contains(err.Error(), "OBS download failed (401)")
+	if isOBSAuthFailure {
+		line.ClearEncryptedAccessTokenCache()
+		return h.NewClient(), true
+	}
 	if !strings.Contains(err.Error(), "401") && !h.IsRefreshRequired(err) && !h.IsLoggedOut(err) {
 		return nil, false
 	}

@@ -283,6 +283,15 @@ cd data
 
 ## Login
 
+The bridge offers two login flows:
+
+- **QR Code** (recommended): scan the QR code with LINE on your mobile device.
+  On a first login, LINE may show a PIN prompt on mobile; enter the PIN shown
+  by the bridge. If a saved LINE certificate is still valid, the PIN step is
+  skipped.
+- **Email and Password**: enter the email/password configured on your LINE
+  account. This remains available as a secondary login path.
+
 ### Via Beeper Desktop Settings
 
 1. Open Beeper Desktop Settings
@@ -304,9 +313,10 @@ There are two common reasons login can fail:
 
 ### 1. No email is set on your LINE account
 
-This bridge uses the email from your account information. If your
-account is older, you signed in using a phone number, or you signed in
-with Google, you may not have an email set for your LINE account.
+The QR code flow does not require a LINE email address. The email/password
+flow uses the email from your account information. If your account is older,
+or you signed in with Google or Apple, you may not have an email set for your
+LINE account.
 
 **How to set an email for your LINE account:**
 

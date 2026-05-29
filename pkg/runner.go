@@ -22,6 +22,7 @@ type Runner struct {
 	skPtr         uint32         // SecureKey from loadToken
 	storageKey    uint32         // AesKey ptr (after StorageInit)
 	loginCurveKey uint32         // Curve25519Key ptr (after GenerateE2EESecret)
+	loginKeyStore map[int]uint32 // internal ID -> login Curve25519Key ptr
 	keyStore      map[int]uint32 // internal ID -> E2EEKey ptr
 	channelStore  map[int]uint32 // internal ID -> E2EEChannel ptr
 	nextID        int
@@ -36,9 +37,11 @@ type Runner struct {
 }
 
 type SecretResult struct {
-	Secret       string `json:"secret"`
-	Pin          string `json:"pin"`
-	PublicKeyHex string `json:"publicKeyHex"`
+	Secret          string `json:"secret"`
+	Pin             string `json:"pin"`
+	PublicKeyHex    string `json:"publicKeyHex"`
+	PublicKeyBase64 string `json:"publicKeyBase64"`
+	LoginKeyID      int    `json:"loginKeyId"`
 }
 
 type UnwrappedKey struct {
@@ -88,6 +91,7 @@ func GetRunner() (*Runner, error) {
 			token:         token,
 			clientVersion: clientVersion,
 			skPtr:         skPtr,
+			loginKeyStore: make(map[int]uint32),
 			keyStore:      make(map[int]uint32),
 			channelStore:  make(map[int]uint32),
 			nextID:        1,
@@ -127,6 +131,13 @@ func (r *Runner) putChannel(ptr uint32) int {
 	id := r.nextID
 	r.nextID++
 	r.channelStore[id] = ptr
+	return id
+}
+
+func (r *Runner) putLoginKey(ptr uint32) int {
+	id := r.nextID
+	r.nextID++
+	r.loginKeyStore[id] = ptr
 	return id
 }
 
@@ -257,8 +268,14 @@ func (r *Runner) StorageEncrypt(plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ctBytes), nil
 }
 
-// LoginUnwrapKeyChain unwraps the encrypted key chain from LF1 using the login curve key.
+// LoginUnwrapKeyChain unwraps the encrypted key chain from LF1 using the latest login curve key.
 func (r *Runner) LoginUnwrapKeyChain(serverPubB64, encryptedKeyChainB64 string) ([]UnwrappedKey, error) {
+	return r.LoginUnwrapKeyChainWithKey(0, serverPubB64, encryptedKeyChainB64)
+}
+
+// LoginUnwrapKeyChainWithKey unwraps the encrypted key chain from LF1 using a
+// specific login curve key. Passing 0 preserves the legacy latest-key behavior.
+func (r *Runner) LoginUnwrapKeyChainWithKey(loginKeyID int, serverPubB64, encryptedKeyChainB64 string) ([]UnwrappedKey, error) {
 	normalizedServerPub, err := normalizeServerPublicKeyB64(serverPubB64)
 	if err != nil {
 		return nil, err
@@ -267,7 +284,15 @@ func (r *Runner) LoginUnwrapKeyChain(serverPubB64, encryptedKeyChainB64 string) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.loginCurveKey == 0 {
+	loginCurveKey := r.loginCurveKey
+	if loginKeyID != 0 {
+		var ok bool
+		loginCurveKey, ok = r.loginKeyStore[loginKeyID]
+		if !ok {
+			return nil, fmt.Errorf("unknown login key: %d", loginKeyID)
+		}
+	}
+	if loginCurveKey == 0 {
 		return nil, fmt.Errorf("login key not initialized")
 	}
 
@@ -276,7 +301,7 @@ func (r *Runner) LoginUnwrapKeyChain(serverPubB64, encryptedKeyChainB64 string) 
 		return nil, fmt.Errorf("invalid server public key: %w", err)
 	}
 
-	chanPtr, err := r.rt.Curve25519KeyCreateChannel(r.loginCurveKey, serverPubBytes)
+	chanPtr, err := r.rt.Curve25519KeyCreateChannel(loginCurveKey, serverPubBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +567,9 @@ func (r *Runner) ChannelDecryptV1(channelID, senderKeyID, receiverKeyID int, cip
 		return "", "", err
 	}
 
-	ptBytes, err := r.rt.E2EEChannelDecryptV1(chanPtr, ctBytes)
+	ptBytes, err := recoverLTSMBytes("E2EEChannelDecryptV1", func() ([]byte, error) {
+		return r.rt.E2EEChannelDecryptV1(chanPtr, ctBytes)
+	})
 	if err != nil {
 		return "", "", err
 	}
@@ -576,13 +603,25 @@ func (r *Runner) ChannelDecryptV2(channelID int, to, from string, senderKeyID, r
 		return "", "", err
 	}
 
-	ptBytes, err := r.rt.E2EEChannelDecryptV2(chanPtr,
-		to, from, senderKeyID, receiverKeyID, contentType, ctBytes)
+	ptBytes, err := recoverLTSMBytes("E2EEChannelDecryptV2", func() ([]byte, error) {
+		return r.rt.E2EEChannelDecryptV2(chanPtr,
+			to, from, senderKeyID, receiverKeyID, contentType, ctBytes)
+	})
 	if err != nil {
 		return "", "", err
 	}
 
 	return string(ptBytes), base64.StdEncoding.EncodeToString(ptBytes), nil
+}
+
+func recoverLTSMBytes(op string, fn func() ([]byte, error)) (out []byte, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			out = nil
+			err = fmt.Errorf("ltsm %s panic: %v", op, recovered)
+		}
+	}()
+	return fn()
 }
 
 // GenerateE2EESecret generates a login secret with PIN and public key.
@@ -597,6 +636,7 @@ func (r *Runner) GenerateE2EESecret() (*SecretResult, error) {
 		return nil, err
 	}
 	r.loginCurveKey = ckPtr
+	loginKeyID := r.putLoginKey(ckPtr)
 
 	pubBytes, err := r.rt.Curve25519KeyGetPublicKey(ckPtr)
 	if err != nil {
@@ -614,9 +654,11 @@ func (r *Runner) GenerateE2EESecret() (*SecretResult, error) {
 	}
 
 	return &SecretResult{
-		Secret:       secret,
-		Pin:          pin,
-		PublicKeyHex: hex.EncodeToString(pubBytes),
+		Secret:          secret,
+		Pin:             pin,
+		PublicKeyHex:    hex.EncodeToString(pubBytes),
+		PublicKeyBase64: base64.StdEncoding.EncodeToString(pubBytes),
+		LoginKeyID:      loginKeyID,
 	}, nil
 }
 

@@ -138,6 +138,12 @@ type TokenV3IssueResult struct {
 	TokenIssueTimeEpochSec  string                 `json:"tokenIssueTimeEpochSec"`
 }
 
+type QRCodeResponse struct {
+	CallbackURL                string `json:"callbackUrl"`
+	LongPollingMaxCount        int    `json:"longPollingMaxCount"`
+	LongPollingIntervalSeconds int    `json:"longPollingIntervalSec"`
+}
+
 type RefreshApiRetryPolicy struct {
 	InitialDelayInMillis string  `json:"initialDelayInMillis"`
 	MaxDelayInMillis     string  `json:"maxDelayInMillis"`
