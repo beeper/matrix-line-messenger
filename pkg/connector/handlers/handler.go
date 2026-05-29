@@ -25,6 +25,9 @@ type Handler struct {
 
 	// DecryptMedia decrypts E2EE encrypted media data using the given key material.
 	DecryptMedia func(data []byte, keyMaterial string) ([]byte, error)
+
+	// IsAnimatedGif checks if the given data is an animated GIF.
+	IsAnimatedGif func(data []byte) bool
 }
 
 // tryRecoverClient attempts token recovery on auth errors and returns a fresh client.

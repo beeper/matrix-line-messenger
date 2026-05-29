@@ -165,6 +165,16 @@ func (h *Handler) ConvertVideo(ctx context.Context, portal *bridgev2.Portal, int
 	if duration > 0 {
 		videoInfo.Duration = duration
 	}
+	if thumbInfo := data.ContentMetadata["MEDIA_THUMB_INFO"]; thumbInfo != "" {
+		var info struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		}
+		if json.Unmarshal([]byte(thumbInfo), &info) == nil && info.Width > 0 && info.Height > 0 {
+			videoInfo.Width = info.Width
+			videoInfo.Height = info.Height
+		}
+	}
 
 	return &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{

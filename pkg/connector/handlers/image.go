@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"strings"
 
 	"maunium.net/go/mautrix/bridgev2"
@@ -27,22 +29,76 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 		return nil, nil
 	}
 
-	var imgData []byte
-	var err error
-	if isPlainMedia {
-		imgData, err = client.DownloadOBSWithSID(ctx, oid, data.ID, "m")
-	} else {
-		imgData, err = client.DownloadOBS(ctx, oid, data.ID)
+	// MEDIA_CONTENT_INFO marks animated GIFs, which need the original OBS object.
+	metadataAnimated := false
+	var metadataWidth, metadataHeight int
+	if mediaInfo := data.ContentMetadata["MEDIA_CONTENT_INFO"]; mediaInfo != "" {
+		var info struct {
+			Animated bool `json:"animated"`
+			Width    int  `json:"width"`
+			Height   int  `json:"height"`
+		}
+		if json.Unmarshal([]byte(mediaInfo), &info) == nil {
+			metadataAnimated = info.Animated
+			metadataWidth = info.Width
+			metadataHeight = info.Height
+		}
 	}
+	if thumbInfo := data.ContentMetadata["MEDIA_THUMB_INFO"]; thumbInfo != "" {
+		var info struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		}
+		if json.Unmarshal([]byte(thumbInfo), &info) == nil {
+			metadataWidth = info.Width
+			metadataHeight = info.Height
+		}
+	}
+
+	downloadImage := func(c *line.Client) ([]byte, error) {
+		sid := "emi"
+		if isPlainMedia {
+			sid = "m"
+		}
+		if metadataAnimated {
+			if isPlainMedia {
+				imgData, err := c.DownloadOBSOriginal(ctx, oid, data.ID, sid)
+				if err == nil {
+					return imgData, nil
+				}
+				h.Log.Debug().
+					Err(err).
+					Str("oid", oid).
+					Str("msg_id", data.ID).
+					Str("sid", sid).
+					Msg("Failed to download animated image original, falling back to standard OBS path")
+				return c.DownloadOBSWithSID(ctx, oid, data.ID, sid)
+			}
+
+			imgData, err := c.DownloadOBSWithSID(ctx, oid, data.ID, sid)
+			if err == nil {
+				return imgData, nil
+			}
+			h.Log.Debug().
+				Err(err).
+				Str("oid", oid).
+				Str("msg_id", data.ID).
+				Str("sid", sid).
+				Msg("Failed to download encrypted animated image, falling back to original OBS path")
+			return c.DownloadOBSOriginal(ctx, oid, data.ID, sid)
+		}
+		if isPlainMedia {
+			return c.DownloadOBSWithSID(ctx, oid, data.ID, sid)
+		}
+		return c.DownloadOBS(ctx, oid, data.ID)
+	}
+
+	imgData, err := downloadImage(client)
 
 	// Refresh token if we get a 401
 	if newClient, ok := h.tryRecoverClient(ctx, err); ok {
 		client = newClient
-		if isPlainMedia {
-			imgData, err = client.DownloadOBSWithSID(ctx, oid, data.ID, "m")
-		} else {
-			imgData, err = client.DownloadOBS(ctx, oid, data.ID)
-		}
+		imgData, err = downloadImage(client)
 	}
 
 	if err != nil {
@@ -82,11 +138,50 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 		}
 	}
 
+	fileName := "image.jpg"
+	mimeType := "image/jpeg"
+	isAnimated := false
+
+	if h.IsAnimatedGif != nil && h.IsAnimatedGif(imgData) {
+		fileName = "image.gif"
+		mimeType = "image/gif"
+		isAnimated = true
+	} else if len(imgData) >= 3 && string(imgData[0:3]) == "GIF" {
+		fileName = "image.gif"
+		mimeType = "image/gif"
+		isAnimated = metadataAnimated
+	} else if len(imgData) >= 8 && string(imgData[:8]) == "\x89PNG\r\n\x1a\n" {
+		fileName = "image.png"
+		mimeType = "image/png"
+	} else if len(imgData) >= 12 && string(imgData[:4]) == "RIFF" && string(imgData[8:12]) == "WEBP" {
+		fileName = "image.webp"
+		mimeType = "image/webp"
+	}
+
 	// Upload to Matrix
-	mxc, file, err := intent.UploadMedia(ctx, portal.MXID, imgData, "image.jpg", "image/jpeg")
+	mxc, file, err := intent.UploadMedia(ctx, portal.MXID, imgData, fileName, mimeType)
 	if err != nil {
 		h.Log.Error().Err(err).Int("size_bytes", len(imgData)).Msg("Failed to upload image to Matrix")
 		return nil, fmt.Errorf("failed to upload image to matrix: %w", err)
+	}
+
+	msgType := event.MsgImage
+	info := &event.FileInfo{
+		MimeType: mimeType,
+		Size:     len(imgData),
+	}
+	if metadataWidth > 0 && metadataHeight > 0 {
+		info.Width = metadataWidth
+		info.Height = metadataHeight
+	} else if config, _, err := image.DecodeConfig(bytes.NewReader(imgData)); err != nil {
+		h.Log.Warn().Err(err).Bool("animated", isAnimated).Msg("Failed to decode image dimensions")
+	} else {
+		info.Width = config.Width
+		info.Height = config.Height
+	}
+	if isAnimated {
+		info.MauGIF = true
+		info.IsAnimated = true
 	}
 
 	return &bridgev2.ConvertedMessage{
@@ -94,10 +189,11 @@ func (h *Handler) ConvertImage(ctx context.Context, portal *bridgev2.Portal, int
 			{
 				Type: event.EventMessage,
 				Content: &event.MessageEventContent{
-					MsgType:   event.MsgImage,
-					Body:      "image.jpg",
+					MsgType:   msgType,
+					Body:      fileName,
 					URL:       mxc,
 					File:      file,
+					Info:      info,
 					RelatesTo: relatesTo,
 				},
 			},

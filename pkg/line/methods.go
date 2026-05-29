@@ -11,12 +11,16 @@ import (
 )
 
 var (
-	obsTokenMu     sync.Mutex
-	obsTokenCache  string
-	obsTokenExpiry time.Time
+	obsTokenMu    sync.Mutex
+	obsTokenCache = make(map[string]obsTokenCacheEntry)
 )
 
 const obsTokenBuffer = 30 * time.Second
+
+type obsTokenCacheEntry struct {
+	token  string
+	expiry time.Time
+}
 
 // InvalidateOBSTokenCache clears the cached OBS access token. The OBS token is
 // derived from the main LINE access token; when the latter is rotated (refresh
@@ -25,8 +29,7 @@ const obsTokenBuffer = 30 * time.Second
 // Callers must invoke this after any successful re-authentication.
 func InvalidateOBSTokenCache() {
 	obsTokenMu.Lock()
-	obsTokenCache = ""
-	obsTokenExpiry = time.Time{}
+	obsTokenCache = make(map[string]obsTokenCacheEntry)
 	obsTokenMu.Unlock()
 }
 
@@ -591,11 +594,11 @@ func (c *Client) GetLastOpRevision() (int64, error) {
 
 // this token is used to encrypt images, videos, and files uploaded to LINE's OBS storage
 func (c *Client) AcquireEncryptedAccessToken() (string, error) {
+	cacheKey := c.AccessToken
 	obsTokenMu.Lock()
-	if obsTokenCache != "" && time.Now().Before(obsTokenExpiry) {
-		cached := obsTokenCache
+	if cached, ok := obsTokenCache[cacheKey]; ok && cached.token != "" && time.Now().Before(cached.expiry) {
 		obsTokenMu.Unlock()
-		return cached, nil
+		return cached.token, nil
 	}
 	obsTokenMu.Unlock()
 
@@ -627,8 +630,10 @@ func (c *Client) AcquireEncryptedAccessToken() (string, error) {
 	token := parts[1]
 	if expirySec, err := strconv.Atoi(parts[0]); err == nil && expirySec > 0 {
 		obsTokenMu.Lock()
-		obsTokenCache = token
-		obsTokenExpiry = time.Now().Add(time.Duration(expirySec)*time.Second - obsTokenBuffer)
+		obsTokenCache[cacheKey] = obsTokenCacheEntry{
+			token:  token,
+			expiry: time.Now().Add(time.Duration(expirySec)*time.Second - obsTokenBuffer),
+		}
 		obsTokenMu.Unlock()
 	}
 
