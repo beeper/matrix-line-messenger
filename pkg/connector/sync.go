@@ -235,8 +235,9 @@ func (lc *LineClient) prefetchMessages(ctx context.Context) {
 
 // backfillRecentMessages fetches up to limit recent messages for a single
 // chat and queues any not already in the local DB through the normal inbound
-// message path. Used by prefetchMessages on startup and by OpUnblockContact
-// to repopulate a portal that was deleted on block.
+// (live) message path. Used by prefetchMessages on startup. Note that this
+// notifies for any not-yet-bridged messages; the silent backfill path used on
+// unblock goes through FetchMessages instead.
 func (lc *LineClient) backfillRecentMessages(ctx context.Context, chatMID string, limit int) {
 	client := line.NewClient(lc.AccessToken)
 	msgs, err := client.GetRecentMessagesV2(chatMID, limit)

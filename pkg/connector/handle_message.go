@@ -112,11 +112,12 @@ func (lc *LineClient) parseMessageTimestamp(msg *line.Message) time.Time {
 			Msg("Failed to convert message CreatedTime to int64, using current time")
 		return time.Now()
 	}
-	ts := time.UnixMilli(tsInt)
-	if ts.IsZero() {
+	// time.UnixMilli(0) is the Unix epoch, not Go's zero time, so IsZero() never
+	// catches a missing timestamp — guard on the raw value instead.
+	if tsInt == 0 {
 		return time.Now()
 	}
-	return ts
+	return time.UnixMilli(tsInt)
 }
 
 // decryptMessageBody runs E2EE decryption (when needed) for an inbound message
@@ -301,10 +302,10 @@ func (lc *LineClient) convertLineMessage(ctx context.Context, portal *bridgev2.P
 			var entries []mentionEntry
 			for _, ment := range mentionData.MENTIONEES {
 				lc.UserLogin.Bridge.Log.Debug().
-					Str("mid", ment.M).
-					Str("a", ment.A).
-					Str("s", ment.S).
-					Str("e", ment.E).
+					Str("ment_mid", ment.M).
+					Str("ment_a", ment.A).
+					Str("ment_s", ment.S).
+					Str("ment_e", ment.E).
 					Bool("has_formatter", ok).
 					Msg("Processing mention entry")
 				if ment.M != "" {
