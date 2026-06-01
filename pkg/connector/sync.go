@@ -108,6 +108,103 @@ func (lc *LineClient) queueDMChatResync(ctx context.Context, mid string, createP
 	})
 }
 
+// queueDMBackfill asks the framework to backfill a DM portal's recent history.
+// It must run after the portal already exists (e.g. right after queueDMChatResync
+// recreated it on unblock), because the framework skips the backfill check on the
+// resync that creates a portal. CheckNeedsBackfillFunc forces a forward backfill,
+// which goes through FetchMessages and is batch-sent silently — no per-message
+// notifications.
+func (lc *LineClient) queueDMBackfill(mid string) {
+	portalKey := networkid.PortalKey{ID: makePortalID(mid), Receiver: lc.UserLogin.ID}
+	lc.UserLogin.Bridge.QueueRemoteEvent(lc.UserLogin, &simplevent.ChatResync{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventChatResync,
+			PortalKey: portalKey,
+			Timestamp: time.Now(),
+		},
+		CheckNeedsBackfillFunc: func(ctx context.Context, latestMessage *database.Message) (bool, error) {
+			return true, nil
+		},
+	})
+}
+
+// FetchMessages implements bridgev2.BackfillingNetworkAPI. It powers silent,
+// batch-sent history backfill. It is currently triggered when a DM portal is
+// recreated after the contact is unblocked (see queueDMBackfill), repopulating
+// the restored chat's recent history without notifying for every old message.
+// Only the newest params.Count messages are returned; there is no older-history
+// pagination, so backward fetches return an empty, final batch.
+func (lc *LineClient) FetchMessages(ctx context.Context, params bridgev2.FetchMessagesParams) (*bridgev2.FetchMessagesResponse, error) {
+	// We only populate the most recent messages; we don't paginate further back.
+	if !params.Forward {
+		return &bridgev2.FetchMessagesResponse{HasMore: false}, nil
+	}
+
+	chatMID := string(params.Portal.PortalKey.ID)
+	limit := params.Count
+	if limit <= 0 {
+		limit = 50
+	}
+
+	client := line.NewClient(lc.AccessToken)
+	msgs, err := client.GetRecentMessagesV2(chatMID, limit)
+	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
+		if errRecover := lc.recoverToken(ctx); errRecover == nil {
+			client = line.NewClient(lc.AccessToken)
+			msgs, err = client.GetRecentMessagesV2(chatMID, limit)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch recent messages for backfill: %w", err)
+	}
+
+	// GetRecentMessagesV2 returns newest-first; backfill wants oldest-first.
+	backfillMsgs := make([]*bridgev2.BackfillMessage, 0, len(msgs))
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if msg.ContentType == 18 {
+			lc.cacheGroupMembersFromSystemMessage(msg)
+		}
+		if !isBridgeableContentType(msg) {
+			continue
+		}
+
+		sender := bridgev2.EventSender{
+			Sender:   makeUserID(msg.From),
+			IsFromMe: msg.From == lc.Mid,
+		}
+		intent, ok := params.Portal.GetIntentFor(ctx, sender, lc.UserLogin, bridgev2.RemoteEventMessage)
+		if !ok {
+			continue
+		}
+
+		bodyText, unwrappedText := lc.decryptMessageBody(msg, chatMID)
+		converted, err := lc.convertLineMessage(ctx, params.Portal, intent, *msg, bodyText, unwrappedText)
+		if err != nil {
+			lc.UserLogin.Bridge.Log.Warn().Err(err).Str("msg_id", msg.ID).Str("chat_mid", chatMID).Msg("Failed to convert message for backfill")
+			continue
+		}
+		if converted == nil {
+			continue
+		}
+
+		backfillMsgs = append(backfillMsgs, &bridgev2.BackfillMessage{
+			ConvertedMessage: converted,
+			Sender:           sender,
+			ID:               networkid.MessageID(msg.ID),
+			Timestamp:        lc.parseMessageTimestamp(msg),
+		})
+	}
+
+	return &bridgev2.FetchMessagesResponse{
+		Messages: backfillMsgs,
+		HasMore:  false,
+		// Mark the restored chat as read so the silent backfill doesn't leave a
+		// stale unread badge — and so the forward batch send never notifies.
+		MarkRead: true,
+	}, nil
+}
+
 func (lc *LineClient) prefetchMessages(ctx context.Context) {
 	defer lc.wg.Done()
 
@@ -138,8 +235,9 @@ func (lc *LineClient) prefetchMessages(ctx context.Context) {
 
 // backfillRecentMessages fetches up to limit recent messages for a single
 // chat and queues any not already in the local DB through the normal inbound
-// message path. Used by prefetchMessages on startup and by OpUnblockContact
-// to repopulate a portal that was deleted on block.
+// (live) message path. Used by prefetchMessages on startup. Note that this
+// notifies for any not-yet-bridged messages; the silent backfill path used on
+// unblock goes through FetchMessages instead.
 func (lc *LineClient) backfillRecentMessages(ctx context.Context, chatMID string, limit int) {
 	client := line.NewClient(lc.AccessToken)
 	msgs, err := client.GetRecentMessagesV2(chatMID, limit)
@@ -686,18 +784,17 @@ func (lc *LineClient) handleOperation(ctx context.Context, op line.Operation) {
 		lc.cacheMu.Unlock()
 		lc.UserLogin.Bridge.Log.Info().Str("mid", mid).Msg("Contact unblocked")
 		// Reattach the DM portal: emit a ChatResync with CreatePortal so the
-		// framework recreates the portal that was deleted on block, then
-		// backfill recent messages so the room isn't empty.
+		// framework recreates the portal that was deleted on block, then ask it
+		// to backfill recent history. The backfill is batch-sent silently (see
+		// FetchMessages), so the restored chat repopulates without firing a
+		// notification for every old message — a blocked contact can't have sent
+		// anything new, so notifying on unblock is never useful.
 		lowerMid := strings.ToLower(mid)
 		if strings.HasPrefix(lowerMid, "c") || strings.HasPrefix(lowerMid, "r") {
 			return
 		}
 		lc.queueDMChatResync(ctx, mid, true)
-		lc.wg.Add(1)
-		go func() {
-			defer lc.wg.Done()
-			lc.backfillRecentMessages(context.Background(), mid, 50)
-		}()
+		lc.queueDMBackfill(mid)
 
 	case OpContactUpdate:
 		mid := op.Param1

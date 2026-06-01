@@ -137,6 +137,7 @@ func (lc *LineClient) isUserBlocked(mid string) bool {
 var _ bridgev2.NetworkAPI = (*LineClient)(nil)
 var _ bridgev2.NetworkAPIWithUserID = (*LineClient)(nil)
 var _ bridgev2.ReadReceiptHandlingNetworkAPI = (*LineClient)(nil)
+var _ bridgev2.BackfillingNetworkAPI = (*LineClient)(nil)
 var _ bridgev2.ReactionHandlingNetworkAPI = (*LineClient)(nil)
 
 func (lc *LineClient) refreshAndSave(ctx context.Context) error {
