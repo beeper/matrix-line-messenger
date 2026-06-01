@@ -51,6 +51,12 @@ func (lc *LineClient) GetCapabilities(ctx context.Context, portal *bridgev2.Port
 		DeleteMaxAge:          &jsontime.Seconds{Duration: 24 * time.Hour},
 		DeleteChatForEveryone: true,
 		LocationMessage:       event.CapLevelPartialSupport,
+		// Pending LINE group invitations surface as Beeper message requests. AcceptWithMessage
+		// is intentionally left unset so that sending a message implicitly accepts the invite
+		// (bridgev2 autoAcceptMessageRequest) — LINE rejects messages to un-joined groups.
+		MessageRequest: &event.MessageRequestFeatures{
+			AcceptWithButton: event.CapLevelFullySupported,
+		},
 		File: event.FileFeatureMap{
 			event.MsgImage: {
 				Caption: event.CapLevelRejected,

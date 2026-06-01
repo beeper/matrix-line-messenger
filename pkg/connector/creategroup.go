@@ -240,6 +240,22 @@ func (lc *LineClient) registerGroupKey(ctx context.Context, chatMid string, memb
 		return fmt.Errorf("no members with valid E2EE keys")
 	}
 
+	// LINE's registerE2EEGroupKey requires the caller's own key entry as well — without it the
+	// server rejects the request with "empty caller key". The Chrome extension wraps the group
+	// key for every member returned by getLastE2EEPublicKeys, which includes the caller. Mirror
+	// that by wrapping the group key for our own public key and appending ourselves.
+	selfRawID, selfPub, err := lc.E2EE.MyPublicKey()
+	if err != nil {
+		return fmt.Errorf("get own E2EE key: %w", err)
+	}
+	selfEncryptedKey, err := lc.E2EE.WrapGroupKeyForMember(selfPub, groupKeyID)
+	if err != nil {
+		return fmt.Errorf("wrap group key for self: %w", err)
+	}
+	apiMembers = append(apiMembers, lc.Mid)
+	keyIds = append(keyIds, selfRawID)
+	encryptedKeys = append(encryptedKeys, selfEncryptedKey)
+
 	if err := client.RegisterE2EEGroupKey(1, chatMid, apiMembers, keyIds, encryptedKeys); err != nil {
 		if lc.isRefreshRequired(err) || lc.isLoggedOut(err) {
 			if errRecover := lc.recoverToken(ctx); errRecover == nil {

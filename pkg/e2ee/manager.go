@@ -67,6 +67,17 @@ func (m *Manager) MyKeyIDs() (rawID int, keyID int, err error) {
 	return m.myRawKeyID, m.myKeyID, nil
 }
 
+// MyPublicKey returns the bridge user's own latest LINE key ID and base64 public key.
+// Used to include the caller's own entry when registering a group key.
+func (m *Manager) MyPublicKey() (rawID int, pubB64 string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.myRawKeyID == 0 || m.myPublicB64 == "" {
+		return 0, "", fmt.Errorf("my key not loaded")
+	}
+	return m.myRawKeyID, m.myPublicB64, nil
+}
+
 func (m *Manager) InitStorage(wrappedNonce, kdf1, kdf2 string) error {
 	return m.runner.StorageInit(wrappedNonce, kdf1, kdf2)
 }

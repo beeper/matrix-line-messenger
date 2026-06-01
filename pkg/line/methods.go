@@ -758,6 +758,27 @@ func (c *Client) InviteIntoChat(chatMid string, mids []string) error {
 	return err
 }
 
+// ChatInvitationRequest is the single struct argument taken by acceptChatInvitation and
+// rejectChatInvitation. The Chrome extension calls them as `mutate([{reqSeq, chatMid}])`, i.e. a
+// single request struct (unlike inviteIntoRoom, which uses positional scalar args).
+type ChatInvitationRequest struct {
+	ReqSeq  int64  `json:"reqSeq"`
+	ChatMid string `json:"chatMid"`
+}
+
+// AcceptChatInvitation accepts a pending invitation into a LINE group chat (the bridge user
+// joins the chat).
+func (c *Client) AcceptChatInvitation(reqSeq int64, chatMid string) error {
+	_, err := c.callRPC("TalkService", "acceptChatInvitation", ChatInvitationRequest{ReqSeq: reqSeq, ChatMid: chatMid})
+	return err
+}
+
+// RejectChatInvitation declines a pending invitation into a LINE group chat.
+func (c *Client) RejectChatInvitation(reqSeq int64, chatMid string) error {
+	_, err := c.callRPC("TalkService", "rejectChatInvitation", ChatInvitationRequest{ReqSeq: reqSeq, ChatMid: chatMid})
+	return err
+}
+
 // FindContactByUserid looks up a LINE user by their user ID (not MID).
 func (c *Client) FindContactByUserid(userid string) (*Contact, error) {
 	resp, err := c.callRPC("TalkService", "findContactByUserid", userid)
