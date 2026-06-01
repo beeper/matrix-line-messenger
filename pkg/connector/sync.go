@@ -246,11 +246,13 @@ func (lc *LineClient) chatToChatInfo(ctx context.Context, chat *line.Chat, exclu
 		if chat.Extra.GroupExtra.CreatorMid == lc.Mid {
 			members[0].PowerLevel = ptr.Ptr(100)
 		}
-		// If the bridge user is invited but not yet a full member of a GROUP, surface the chat
-		// as a Beeper message request (Requests section) via info.MessageRequest below. Don't
-		// mark self as MembershipInvite: on Beeper an invite-membership self user is excluded
-		// from the room entirely (getInitialMemberList skips non-join members), so the room
-		// would never appear.
+		// If the bridge user is invited but not yet a full member of a GROUP (type 0), surface the
+		// chat as a Beeper message request (Requests section) via info.MessageRequest below. The
+		// gate is GROUP-only on purpose: LINE ROOMs (type 1) have no accept step — invitees are
+		// auto-joined (see the invitee loop below, which also joins type-1 invitees) — so a room is
+		// created as a normal joined room rather than a request. Don't mark self as
+		// MembershipInvite: on Beeper an invite-membership self user is excluded from the room
+		// entirely (getInitialMemberList skips non-join members), so the room would never appear.
 		if _, isMember := chat.Extra.GroupExtra.MemberMids[lc.Mid]; !isMember && chat.Type == 0 {
 			if _, isInvitee := chat.Extra.GroupExtra.InviteeMids[lc.Mid]; isInvitee {
 				selfInvitePending = true
@@ -1260,11 +1262,6 @@ func (lc *LineClient) handleMemberJoin(chatMid, joinerMid string) {
 }
 
 func (lc *LineClient) handleInvite(ctx context.Context, chatMid string, opType OperationType) {
-	// The invitee receives OpNotifiedInviteIntoChat (124), while OpInviteIntoChat (123) is
-	// reflected to the inviter — so we can't rely on the op number to tell whether the bridge
-	// user was invited. Fetch the chat once and check InviteeMids authoritatively (keeping
-	// opType == OpInviteIntoChat as a fallback for the LINE quirk where GetChats omits the
-	// caller from the invitee list).
 	client := line.NewClient(lc.AccessToken)
 	chatsResp, err := client.GetChats([]string{chatMid}, true, true)
 	if err != nil && (lc.isRefreshRequired(err) || lc.isLoggedOut(err)) {
@@ -1277,34 +1274,38 @@ func (lc *LineClient) handleInvite(ctx context.Context, chatMid string, opType O
 		lc.UserLogin.Bridge.Log.Warn().Err(err).Str("chat_mid", chatMid).Msg("Failed to fetch chat info for invite")
 		return
 	}
-	if len(chatsResp.Chats) == 0 {
+	if len(chatsResp.Chats) == 0 || chatsResp.Chats[0].Extra.GroupExtra == nil {
 		return
 	}
 	chat := chatsResp.Chats[0]
 
-	selfInvited := opType == OpInviteIntoChat
-	if chat.Extra.GroupExtra != nil {
-		if _, ok := chat.Extra.GroupExtra.InviteeMids[lc.Mid]; ok {
-			selfInvited = true
-		}
-	}
-	if selfInvited {
+	// Both OpInviteIntoChat (123) and OpNotifiedInviteIntoChat (124) dispatch here. We deliberately
+	// don't branch on the op number: the op→party mapping is ambiguous and GetChats sometimes omits
+	// the caller from the member/invitee lists. Instead, treat the bridge user as the invitee unless
+	// they're a confirmed member — a member receiving this op is the inviter or an existing member,
+	// whose chat must NOT be flipped into a request. The !member check also covers the LINE quirk
+	// where GetChats omits the caller entirely when they are the one being invited.
+	_, selfIsMember := chat.Extra.GroupExtra.MemberMids[lc.Mid]
+	lc.UserLogin.Bridge.Log.Debug().
+		Int("op_type", int(opType)).
+		Str("chat_mid", chatMid).
+		Bool("self_is_member", selfIsMember).
+		Msg("Handling chat invite")
+	if !selfIsMember {
 		// Bridge user was invited: create the portal as a Beeper message request.
 		lc.handleInviteForSelfFromChat(ctx, &chat)
 	}
 
 	// Reflect any other pending invitees as invited members of the (now existing) portal.
-	if chat.Extra.GroupExtra != nil {
-		membership := event.MembershipInvite
-		if chat.Type == 1 {
-			membership = event.MembershipJoin
+	membership := event.MembershipInvite
+	if chat.Type == 1 {
+		membership = event.MembershipJoin
+	}
+	for inviteeMid := range chat.Extra.GroupExtra.InviteeMids {
+		if inviteeMid == lc.Mid || inviteeMid == string(lc.UserLogin.ID) {
+			continue
 		}
-		for inviteeMid := range chat.Extra.GroupExtra.InviteeMids {
-			if inviteeMid == lc.Mid || inviteeMid == string(lc.UserLogin.ID) {
-				continue
-			}
-			lc.emitMemberChange(chat.ChatMid, inviteeMid, membership, time.Now())
-		}
+		lc.emitMemberChange(chat.ChatMid, inviteeMid, membership, time.Now())
 	}
 }
 
@@ -1383,12 +1384,18 @@ func (lc *LineClient) handleSystemMessage(op line.Operation) {
 			inviteeMid := parts[1]
 			if inviteeMid == lc.Mid || inviteeMid == string(lc.UserLogin.ID) {
 				// The bridge user is the invitee: create the portal as a message request.
-				// Defense-in-depth in case no OpNotifiedInviteIntoChat SSE op arrives — an
-				// emitMemberChange here would be dropped because the portal doesn't exist yet.
+				// Defense-in-depth in case no OpInviteIntoChat/OpNotifiedInviteIntoChat SSE op
+				// arrives — an emitMemberChange here would be dropped because the portal doesn't
+				// exist yet. The SSE handler usually wins the race, so only act as a fallback when
+				// the portal doesn't exist yet, to avoid a duplicate GetChats + ChatResync.
 				chatMid := msg.To
 				lc.wg.Add(1)
 				go func() {
 					defer lc.wg.Done()
+					portalKey := networkid.PortalKey{ID: makePortalID(chatMid), Receiver: lc.UserLogin.ID}
+					if portal, err := lc.UserLogin.Bridge.GetExistingPortalByKey(context.Background(), portalKey); err == nil && portal != nil && portal.MXID != "" {
+						return
+					}
 					lc.handleInviteForSelf(context.Background(), chatMid)
 				}()
 			} else {
