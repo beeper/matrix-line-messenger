@@ -71,6 +71,8 @@ jobs:
 
   build-docker:
     runs-on: ubuntu-latest
+    env:
+      HAS_DOCKER_REGISTRY_CREDS: ${{ secrets.CI_REGISTRY != '' && secrets.CI_REGISTRY_USER != '' && secrets.CI_REGISTRY_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +80,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to registry
+        if: env.HAS_DOCKER_REGISTRY_CREDS == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ secrets.CI_REGISTRY }}
@@ -85,6 +88,17 @@ jobs:
           password: ${{ secrets.CI_REGISTRY_PASSWORD }}
 
       - name: Docker Build
+        if: env.HAS_DOCKER_REGISTRY_CREDS != 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          pull: true
+          file: Dockerfile
+          tags: matrix-line:${{ github.sha }}
+          push: false
+
+      - name: Docker Build and Push
+        if: env.HAS_DOCKER_REGISTRY_CREDS == 'true'
         uses: docker/build-push-action@v5
         with:
           context: .
