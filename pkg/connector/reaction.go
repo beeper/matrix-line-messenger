@@ -509,6 +509,9 @@ func parseLineSticonURL(rawURL string) (linePaidReactionRef, error) {
 
 func normalizeMatrixReactionKey(key string) string {
 	key = strings.Map(func(r rune) rune {
+		if r >= '\U0001F3FB' && r <= '\U0001F3FF' {
+			return -1
+		}
 		switch r {
 		case '\uFE0E', '\uFE0F':
 			return -1
